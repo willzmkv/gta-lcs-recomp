@@ -1,0 +1,40 @@
+{
+    "version": 4,
+    "name": "gtalcs.zip",
+    "items": [
+        "Grand Theft Auto Liberty City Stories.sh",
+        "gtalcs"
+    ],
+    "items_opt": null,
+    "attr": {
+        "title": "Grand Theft Auto: Liberty City Stories",
+        "porter": [
+            "R36S LCS project"
+        ],
+        "desc": "AArch64 PortMaster compatibility port of the Android release of Grand Theft Auto: Liberty City Stories. Rockstar game files are not included.",
+        "desc_md": null,
+        "inst": "Requires a complete, legally owned LCS 2.4.379 ARM64 Google Play installation. Copy base.apk, the matching arm64-v8a split and data_main asset split (or a complete APKS/APKM/XAPK bundle) into ports/gtalcs/gamedata, then launch once. This release uses Play Asset Delivery, not an OBB.",
+        "inst_md": null,
+        "genres": [
+            "action",
+            "adventure"
+        ],
+        "image": {},
+        "rtr": false,
+        "exp": false,
+        "runtime": [],
+        "store": [
+            {
+                "name": "Google Play Store",
+                "gameurl": "https://play.google.com/store/apps/details?id=com.rockstargames.gtalcs",
+                "developerurl": "https://www.rockstargames.com/games/libertycitystories"
+            }
+        ],
+        "availability": "paid",
+        "reqs": [],
+        "arch": [
+            "aarch64"
+        ],
+        "min_glibc": ""
+    }
+}

@@ -1,0 +1,72 @@
+# ==========================================
+# GTA Liberty City Stories PC - .gitignore
+# ==========================================
+
+# Game data, ROMs, APKs, IPAs, WADs
+*.ipa
+*.apk
+*.apks
+*.apkm
+*.xapk
+*.wad
+*.iso
+*.cso
+*.bin
+
+# Binaries and compiled libraries
+*.exe
+*.dll
+*.so
+*.so.*
+*.dylib
+*.elf
+lcs_runtime
+gtalcs/lcs_runtime
+gtalcs.zip
+
+# Proprietary extracted game files
+gtalcs/gamefiles/
+gtalcs/gamedata/
+gtalcs/userdata/
+gtalcs/logs/
+gtalcs/.setup/
+extracted/
+extracted_ipa/
+extracted_apk/
+converted_textures/
+
+# User data and saves
+*.b
+*.set
+logs/
+userdata/
+saves/
+
+# Build directories
+build/
+bin/
+out/
+dist/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+# Object and compiler files
+*.obj
+*.o
+*.lib
+*.a
+*.pdb
+*.ilk
+*.exp
+
+# IDE and system
+.vs/
+.vscode/
+.idea/
+CMakeSettings.json
+CMakeUserPresets.json
+*.suo
+*.user
+Thumbs.db
+.DS_Store

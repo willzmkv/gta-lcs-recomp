@@ -1,0 +1,8 @@
+Grand Theft Auto: Liberty City Stories and all Rockstar game binaries, assets,
+music, trademarks and related material are property of their respective
+owners. They are not licensed or distributed with this compatibility port.
+
+Users must supply files from their own legally obtained installation. The
+setup utility only copies/extracts those files locally and never removes the
+source archives.
+

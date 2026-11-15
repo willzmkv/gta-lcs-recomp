@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<gameList>
+  <game>
+    <path>./Grand Theft Auto Liberty City Stories.sh</path>
+    <name>Grand Theft Auto: Liberty City Stories</name>
+    <desc>AArch64 PortMaster port of the Android release. Legal Rockstar game files must be supplied separately.</desc>
+    <releasedate>20051024T000000</releasedate>
+    <developer>Rockstar Leeds / Rockstar North</developer>
+    <publisher>Rockstar Games</publisher>
+    <genre>Action-Adventure</genre>
+  </game>
+</gameList>
