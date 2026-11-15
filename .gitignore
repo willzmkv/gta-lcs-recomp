@@ -25,6 +25,7 @@ gtalcs/lcs_runtime
 gtalcs.zip
 
 # Proprietary extracted game files
+assets/
 gtalcs/gamefiles/
 gtalcs/gamedata/
 gtalcs/userdata/
