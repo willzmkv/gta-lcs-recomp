@@ -140,6 +140,37 @@ elseif(UNIX)
     )
 endif()
 
+# Dynarmic ARM64 JIT
+set(DYNARMIC_ROOT "D:/Games/Lichii-nx2/Lichii-nx2" CACHE PATH "Path to Dynarmic")
+if(EXISTS "${DYNARMIC_ROOT}/src/dynarmic/src")
+    message(STATUS "Found Dynarmic include directory: ${DYNARMIC_ROOT}/src/dynarmic/src")
+    target_include_directories(lcs PRIVATE
+        "${DYNARMIC_ROOT}/src"
+        "${DYNARMIC_ROOT}/src/dynarmic/src"
+        "${DYNARMIC_ROOT}/build/_deps/fmt-src/include"
+    )
+
+    # Boost modular headers for Dynarmic ExclusiveMonitor
+    set(BOOST_ROOT "${DYNARMIC_ROOT}/.cache/cpm/boost/1.92.0/libs")
+    if(EXISTS "${BOOST_ROOT}")
+        file(GLOB BOOST_LIB_DIRS "${BOOST_ROOT}/*")
+        foreach(lib ${BOOST_LIB_DIRS})
+            if(IS_DIRECTORY "${lib}/include")
+                target_include_directories(lcs PRIVATE "${lib}/include")
+            endif()
+        endforeach()
+    endif()
+    if(EXISTS "${DYNARMIC_ROOT}/build/src/dynarmic/src/dynarmic/dynarmic.lib")
+        message(STATUS "Found precompiled Dynarmic library: ${DYNARMIC_ROOT}/build/src/dynarmic/src/dynarmic/dynarmic.lib")
+        target_link_libraries(lcs PRIVATE
+            "${DYNARMIC_ROOT}/build/src/dynarmic/src/dynarmic/dynarmic.lib"
+            "${DYNARMIC_ROOT}/build/src/common/common.lib"
+            "${DYNARMIC_ROOT}/build/_deps/fmt-build/fmt.lib"
+        )
+        add_compile_definitions(LCS_HAS_DYNARMIC=1)
+    endif()
+endif()
+
 message(STATUS "GTA: Liberty City Stories Native PC Port configured.")
 message(STATUS "  Platform:     ${CMAKE_SYSTEM_NAME} (${CMAKE_SYSTEM_PROCESSOR})")
 message(STATUS "  Direct3D 12:  ${ENABLE_D3D12}")
