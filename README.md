@@ -98,6 +98,7 @@ Launch the game directly:
 | `python tools/extract_ipa.py [IPA]` | Extract models, audio, and textures from iPad release |
 | `python tools/wad_tool.py unpack [WAD]` | Inspect and unpack Android `data_main.wad` archives |
 | `python tools/texture_convert.py` | Batch convert PVRTC textures to PC-native DXT/BC7 |
+| `python tools/ghidra_analyze.py` | Headless Ghidra decompilation and analysis pipeline |
 
 ---
 
