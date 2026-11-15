@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 project(gta-lcs-recomp
     VERSION 0.1.0
-    DESCRIPTION "Native PC port of GTA Liberty City Stories with Dynarmic ARM64 JIT, D3D12/Vulkan, and iPad Definitive Assets"
+    DESCRIPTION "Native PC port of GTA Liberty City Stories with Dynarmic ARM64 JIT, D3D12/Vulkan 1.4, and iPad Definitive Assets"
     LANGUAGES C CXX
 )
 
@@ -23,7 +23,7 @@ endif()
 
 # Configuration options
 option(ENABLE_D3D12 "Enable Direct3D 12 rendering backend (Windows only)" ON)
-option(ENABLE_VULKAN "Enable Vulkan 1.3 rendering backend" ON)
+option(ENABLE_VULKAN "Enable Vulkan 1.4 rendering backend" ON)
 option(ENABLE_LTO "Enable Link-Time Optimization (LTO) for release builds" OFF)
 option(ENABLE_TESTS "Build internal test harness" OFF)
 
@@ -143,4 +143,4 @@ endif()
 message(STATUS "GTA: Liberty City Stories Native PC Port configured.")
 message(STATUS "  Platform:     ${CMAKE_SYSTEM_NAME} (${CMAKE_SYSTEM_PROCESSOR})")
 message(STATUS "  Direct3D 12:  ${ENABLE_D3D12}")
-message(STATUS "  Vulkan 1.3:   ${ENABLE_VULKAN}")
+message(STATUS "  Vulkan 1.4:   ${ENABLE_VULKAN}")

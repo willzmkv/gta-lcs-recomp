@@ -8,7 +8,7 @@ Welcome to **gta-lcs-recomp**. This document defines the engineering conventions
 
 1. **Rendering Backends:**
    - **Direct3D 12** on Windows (`src/graphics/r_d3d12/`).
-   - **Vulkan 1.3** on Linux & Windows (`src/graphics/r_vulkan/`).
+   - **Vulkan 1.4** on Linux & Windows (`src/graphics/r_vulkan/`).
    - **No legacy OpenGL / OpenGL ES:** Do NOT introduce OpenGL or EGL contexts into the PC runtime. All mobile GLES calls must route through the modern abstract render bridge (`src/graphics/render_bridge.cpp`).
 
 2. **CPU Execution:**

@@ -46,10 +46,10 @@ def inspect_ipa(ipa_path):
         data_count = sum(1 for e in entries if "/data/" in e.lower())
         
         print(f"Total entries in IPA: {total}")
-        print(f"  • PVR Retina Textures: {pvr_count}")
-        print(f"  • Audio Streams/SFX:   {audio_count}")
-        print(f"  • Custom GLSL Shaders: {glsl_count}")
-        print(f"  • Data/Map Definition: {data_count}")
+        print(f"  - PVR Retina Textures: {pvr_count}")
+        print(f"  - Audio Streams/SFX:   {audio_count}")
+        print(f"  - Custom GLSL Shaders: {glsl_count}")
+        print(f"  - Data/Map Definition: {data_count}")
 
 def extract_assets(ipa_path, out_dir):
     print(f"Extracting assets from: {ipa_path}")

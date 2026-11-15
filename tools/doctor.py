@@ -154,9 +154,9 @@ def print_report(rep):
     
     gf = rep['game_files']
     print(f"{tag(gf['ok'])} Legal Game Files:")
-    print(f"       • Android Binary (libGame.so): {'FOUND' if gf['files']['libgame'] else 'MISSING'}")
-    print(f"       • Android Data (data_main.wad): {'FOUND' if gf['files']['data_main'] else 'MISSING'}")
-    print(f"       • iPad Definitive IPA:          {'FOUND' if gf['files']['ipa_source'] else 'MISSING'}")
+    print(f"       - Android Binary (libGame.so): {'FOUND' if gf['files']['libgame'] else 'MISSING'}")
+    print(f"       - Android Data (data_main.wad): {'FOUND' if gf['files']['data_main'] else 'MISSING'}")
+    print(f"       - iPad Definitive IPA:          {'FOUND' if gf['files']['ipa_source'] else 'MISSING'}")
 
     print("-" * 60)
     if rep["overall_ok"]:
