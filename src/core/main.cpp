@@ -3,6 +3,9 @@
 #include <filesystem>
 #include <thread>
 #include <atomic>
+#include <string>
+#include <cstdlib>
+#include <chrono>
 #if defined(LCS_PLATFORM_WINDOWS)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -14,12 +17,33 @@
 #include "cpu/callbacks.h"
 #include "os/jni_bridge.h"
 #include "os/bionic_libc.h"
+#include "graphics/window.h"
+#include "graphics/render_bridge.h"
 
 static lcs::cpu::DynarmicCore* s_active_cpu = nullptr;
 
 #if defined(LCS_PLATFORM_WINDOWS)
+static bool IsFatalHardwareException(DWORD code) {
+    switch (code) {
+        case EXCEPTION_ACCESS_VIOLATION:
+        case EXCEPTION_ILLEGAL_INSTRUCTION:
+        case EXCEPTION_PRIV_INSTRUCTION:
+        case EXCEPTION_INT_DIVIDE_BY_ZERO:
+        case EXCEPTION_STACK_OVERFLOW:
+        case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+        case EXCEPTION_IN_PAGE_ERROR:
+            return true;
+        default:
+            return false;
+    }
+}
+
 static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ep) {
     auto rec = ep->ExceptionRecord;
+    // Allow internal OS / DXGI / driver try-catch C++ exceptions and debug signals to propagate normally.
+    if (!IsFatalHardwareException(rec->ExceptionCode)) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
     std::cerr << "\n[CRASH TRAP] Exception Code: 0x" << std::hex << rec->ExceptionCode
               << " at host address 0x" << rec->ExceptionAddress << std::dec << "\n";
     MEMORY_BASIC_INFORMATION mbi;
@@ -51,14 +75,31 @@ static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ep) {
         std::cerr << std::dec << std::flush;
         std::cout << std::flush;
     }
-    std::exit(1);
-    return EXCEPTION_EXECUTE_HANDLER;
+    ExitProcess(1);
 }
 #endif
 
 int main(int argc, char* argv[]) {
-    (void)argc;
-    (void)argv;
+    bool headless = false;
+    bool dump_render = false;
+    uint64_t max_frames = 0;
+    uint32_t win_width = 1280;
+    uint32_t win_height = 720;
+
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--headless") {
+            headless = true;
+        } else if (arg == "--dump-render") {
+            dump_render = true;
+        } else if (arg == "--max-frames" && i + 1 < argc) {
+            max_frames = std::strtoull(argv[++i], nullptr, 10);
+        } else if (arg == "--width" && i + 1 < argc) {
+            win_width = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));
+        } else if (arg == "--height" && i + 1 < argc) {
+            win_height = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));
+        }
+    }
 
 #if defined(_WIN32)
     _set_invalid_parameter_handler([](const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, uintptr_t) {
@@ -286,10 +327,11 @@ int main(int argc, char* argv[]) {
     uint64_t dummy_clazz = lcs::os::JNI_GUEST_CLASS_BASE;
 
     // 1. setPrivateFilesDir
+    std::filesystem::create_directories("gtalcs/userdata");
     uint64_t fn_set_private_dir = image_game.find_symbol("Java_com_rockstargames_gtalcs_GTAJNIlib_setPrivateFilesDir");
     if (fn_set_private_dir) {
-        uint64_t str_dir = lcs::os::JNIBridge::instance().create_string_utf("gtalcs/userdata");
-        std::cout << "  [1] Invoking setPrivateFilesDir(\"gtalcs/userdata\")..." << std::flush;
+        uint64_t str_dir = lcs::os::JNIBridge::instance().create_string_utf("gtalcs/userdata/");
+        std::cout << "  [1] Invoking setPrivateFilesDir(\"gtalcs/userdata/\")..." << std::flush;
         cpu.call(fn_set_private_dir, {env_addr, dummy_clazz, str_dir});
         std::cout << " OK\n";
     }
@@ -369,6 +411,32 @@ int main(int argc, char* argv[]) {
         std::cout << "  [8] isInitialized() -> " << (is_init ? "TRUE [PASS]" : "FALSE [FAIL]") << "\n";
     }
 
+    std::cout << "\n[Step 9] Initializing Native Desktop Window & Direct3D 12 Swapchain...\n";
+    void* native_window = nullptr;
+    if (!headless) {
+        if (!lcs::graphics::create_game_window(
+                static_cast<int>(win_width),
+                static_cast<int>(win_height),
+                "GTA: Liberty City Stories - Native PC Port (D3D12)")) {
+            std::cerr << "[ERROR] Failed to create native game window.\n";
+            return 1;
+        }
+        lcs::graphics::get_window_size(win_width, win_height);
+        native_window = lcs::graphics::get_native_window_handle();
+        lcs::graphics::set_window_resize_callback([](uint32_t new_w, uint32_t new_h) {
+            lcs::graphics::RenderBridge::instance().set_surface_dimensions(new_w, new_h);
+        });
+    }
+
+    if (!lcs::graphics::RenderBridge::instance().initialize(
+            lcs::graphics::RenderBackend::Direct3D12,
+            native_window,
+            win_width,
+            win_height)) {
+        std::cerr << "[ERROR] Failed to initialize RenderBridge.\n";
+        return 1;
+    }
+
     // 9. viewOnSurfaceCreated
     uint64_t fn_surf_created = image_game.find_symbol("Java_com_rockstargames_gtalcs_GTAJNIlib_viewOnSurfaceCreated");
     if (fn_surf_created) {
@@ -380,20 +448,115 @@ int main(int argc, char* argv[]) {
     // 10. viewOnSurfaceChanged
     uint64_t fn_surf_changed = image_game.find_symbol("Java_com_rockstargames_gtalcs_GTAJNIlib_viewOnSurfaceChanged");
     if (fn_surf_changed) {
-        std::cout << "  [10] Invoking viewOnSurfaceChanged(1920, 1080)..." << std::flush;
-        cpu.call(fn_surf_changed, {env_addr, dummy_clazz, 1920, 1080});
+        std::cout << "  [10] Invoking viewOnSurfaceChanged(" << win_width << ", " << win_height << ")..." << std::flush;
+        cpu.call(fn_surf_changed, {env_addr, dummy_clazz, win_width, win_height});
         std::cout << " OK\n";
     }
 
-    // 11. viewOnDrawFrame (Frame 1 test)
+    // 10.5 viewOnResume
+    uint64_t fn_resume = image_game.find_symbol("Java_com_rockstargames_gtalcs_GTAJNIlib_viewOnResume");
+    if (fn_resume) {
+        std::cout << "  [10.5] Invoking viewOnResume()..." << std::flush;
+        cpu.call(fn_resume, {env_addr, dummy_clazz});
+        std::cout << " OK\n";
+    }
+
+    // 11. Continuous Render & Game Loop (viewOnDrawFrame)
     uint64_t fn_draw_frame = image_game.find_symbol("Java_com_rockstargames_gtalcs_GTAJNIlib_viewOnDrawFrame");
+    uint64_t fn_playlist_finish = image_game.find_symbol("Java_com_rockstargames_gtalcs_CommonAPI_HandlePlaylistFinishInit");
+    uint64_t fn_game_loaded = image_game.find_symbol("Java_com_rockstargames_gtalcs_RockstarJNIlib_GameLoaded");
+    uint64_t fn_start_before_load = image_game.find_symbol("Java_com_rockstargames_gtalcs_RockstarJNIlib_StartGameBeforeLoad");
+    uint64_t fn_start_game = image_game.find_symbol("Java_com_rockstargames_gtalcs_RockstarJNIlib_StartGame");
+
     if (fn_draw_frame) {
-        std::cout << "  [11] Invoking viewOnDrawFrame()..." << std::flush;
-        cpu.call(fn_draw_frame, {env_addr, dummy_clazz});
-        std::cout << " OK\n";
+        std::cout << "  [11] Entering main frame loop"
+                  << (max_frames > 0 ? " (max_frames=" + std::to_string(max_frames) + ")" : "")
+                  << "...\n" << std::flush;
+
+        auto& bridge = lcs::graphics::RenderBridge::instance();
+        uint64_t rendered_frames = 0;
+        auto last_time = std::chrono::steady_clock::now();
+        while (headless || lcs::graphics::poll_window_events()) {
+            // Drain any asynchronous Java -> Native callbacks queued during the previous frame.
+            auto pending = lcs::os::JNIBridge::instance().consume_pending_callbacks();
+            if (pending.playlist_finish_init && fn_playlist_finish) {
+                std::cout << "  [JNI Dispatch] CommonAPI.HandlePlaylistFinishInit(false)\n" << std::flush;
+                cpu.call(fn_playlist_finish, {env_addr, dummy_clazz, 0});
+            }
+            if (pending.game_loaded && fn_game_loaded) {
+                std::cout << "  [JNI Dispatch] RockstarJNIlib.GameLoaded()\n" << std::flush;
+                cpu.call(fn_game_loaded, {env_addr, dummy_clazz});
+            }
+            if (pending.start_game_before_load && fn_start_before_load) {
+                std::cout << "  [JNI Dispatch] RockstarJNIlib.StartGameBeforeLoad()\n" << std::flush;
+                cpu.call(fn_start_before_load, {env_addr, dummy_clazz});
+            }
+            if (pending.start_game && fn_start_game) {
+                std::cout << "  [JNI Dispatch] RockstarJNIlib.StartGame()\n" << std::flush;
+                cpu.call(fn_start_game, {env_addr, dummy_clazz});
+            }
+            if (pending.quit_requested) {
+                std::cout << "  [JNI Dispatch] QuitApp requested by game.\n" << std::flush;
+                break;
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            float dt = std::chrono::duration<float>(now - last_time).count();
+            last_time = now;
+            if (rendered_frames == 0 || dt <= 0.0f || dt > 0.1f) {
+                dt = 1.0f / 60.0f;
+            }
+
+            bridge.begin_frame();
+            uint64_t pre_swaps = bridge.get_frame_count();
+            uint64_t pre_draws = bridge.get_draw_call_count();
+
+            cpu.set_fp_float(0, dt);
+            cpu.call(fn_draw_frame, {env_addr, dummy_clazz});
+
+            bool guest_swapped = (bridge.get_frame_count() > pre_swaps);
+            // Present if the guest did not explicitly invoke eglSwapBuffers during viewOnDrawFrame.
+            if (!guest_swapped) {
+                bridge.end_frame_and_present();
+            }
+
+            rendered_frames++;
+            uint64_t frame_draws = bridge.get_draw_call_count() - pre_draws;
+            if (rendered_frames <= 15 || rendered_frames % 60 == 0) {
+                std::cout << "  - Frame " << rendered_frames
+                          << " (dt=" << dt << "s, frame_draws=" << frame_draws
+                          << ", guest_swap=" << (guest_swapped ? "yes" : "no")
+                          << ", total_draws=" << bridge.get_draw_call_count()
+                          << ", shaders=" << bridge.get_shader_count()
+                          << ", programs=" << bridge.get_program_count()
+                          << ", textures=" << bridge.get_texture_count()
+                          << ", buffers=" << bridge.get_buffer_count() << ").\n" << std::flush;
+            }
+
+            if (max_frames > 0 && rendered_frames >= max_frames) {
+                break;
+            }
+        }
+
+        std::cout << "\n[Result] Render loop exited after " << rendered_frames << " frames ("
+                  << "draws=" << bridge.get_draw_call_count()
+                  << ", shaders=" << bridge.get_shader_count()
+                  << ", programs=" << bridge.get_program_count()
+                  << ", textures=" << bridge.get_texture_count()
+                  << ", buffers=" << bridge.get_buffer_count() << ").\n";
+
+        if (dump_render) {
+            std::filesystem::create_directories("scratch");
+            bridge.dump_diagnostics("scratch/render_dump.txt");
+            std::cout << "  - Render diagnostics saved to scratch/render_dump.txt\n";
+        }
     }
 
-    std::cout << "\n[Result] Android lifecycle bootstrap sequence completed successfully.\n";
+    lcs::graphics::RenderBridge::instance().shutdown();
+    if (!headless) {
+        lcs::graphics::destroy_game_window();
+    }
+
 #if defined(_WIN32)
     ExitProcess(0);
 #else

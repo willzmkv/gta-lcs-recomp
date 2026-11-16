@@ -1032,11 +1032,6 @@ void HLEManager::register_default_stubs() {
         return 0;
     });
 
-    // GLES State Stubs
-    register_function("glViewport", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glClearColor", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glClear", [](const uint64_t*) -> uint64_t { return 0; });
-
     // Standard C Algorithm & String Helpers
     register_function("bsearch", [this](const uint64_t* args) -> uint64_t {
         const char* key = reinterpret_cast<const char*>(args[0]);
@@ -1350,27 +1345,27 @@ void HLEManager::register_default_stubs() {
     });
 
     // GLES 2.0/3.0 State, Shader, Buffer, and Drawing Bridge
-    static uint32_t s_next_tex_id = 1;
     register_function("glGenTextures", [](const uint64_t* args) -> uint64_t {
-        int32_t n = static_cast<int32_t>(args[0]);
-        uint32_t* textures = reinterpret_cast<uint32_t*>(args[1]);
-        if (textures && n > 0) {
-            for (int32_t i = 0; i < n; i++) textures[i] = s_next_tex_id++;
-        }
+        lcs::graphics::RenderBridge::instance().gl_gen_textures(
+            static_cast<int32_t>(args[0]), reinterpret_cast<uint32_t*>(args[1]));
         return 0;
     });
-    register_function("glDeleteTextures", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glDeleteTextures", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_delete_textures(
+            static_cast<int32_t>(args[0]), reinterpret_cast<const uint32_t*>(args[1]));
+        return 0;
+    });
 
-    static uint32_t s_next_buf_id = 1;
     register_function("glGenBuffers", [](const uint64_t* args) -> uint64_t {
-        int32_t n = static_cast<int32_t>(args[0]);
-        uint32_t* buffers = reinterpret_cast<uint32_t*>(args[1]);
-        if (buffers && n > 0) {
-            for (int32_t i = 0; i < n; i++) buffers[i] = s_next_buf_id++;
-        }
+        lcs::graphics::RenderBridge::instance().gl_gen_buffers(
+            static_cast<int32_t>(args[0]), reinterpret_cast<uint32_t*>(args[1]));
         return 0;
     });
-    register_function("glDeleteBuffers", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glDeleteBuffers", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_delete_buffers(
+            static_cast<int32_t>(args[0]), reinterpret_cast<const uint32_t*>(args[1]));
+        return 0;
+    });
 
     static uint32_t s_next_fbo_id = 1;
     register_function("glGenFramebuffers", [](const uint64_t* args) -> uint64_t {
@@ -1398,12 +1393,25 @@ void HLEManager::register_default_stubs() {
         return 0x8CD5; // GL_FRAMEBUFFER_COMPLETE
     });
 
-    static uint32_t s_next_shader_id = 1;
-    register_function("glCreateShader", [](const uint64_t*) -> uint64_t {
-        return s_next_shader_id++;
+    register_function("glCreateShader", [](const uint64_t* args) -> uint64_t {
+        return lcs::graphics::RenderBridge::instance().gl_create_shader(static_cast<uint32_t>(args[0]));
     });
-    register_function("glShaderSource", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glCompileShader", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glDeleteShader", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_delete_shader(static_cast<uint32_t>(args[0]));
+        return 0;
+    });
+    register_function("glShaderSource", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_shader_source(
+            static_cast<uint32_t>(args[0]),
+            static_cast<int32_t>(args[1]),
+            reinterpret_cast<const char* const*>(args[2]),
+            reinterpret_cast<const int32_t*>(args[3]));
+        return 0;
+    });
+    register_function("glCompileShader", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_compile_shader(static_cast<uint32_t>(args[0]));
+        return 0;
+    });
     register_function("glGetShaderiv", [](const uint64_t* args) -> uint64_t {
         uint32_t pname = static_cast<uint32_t>(args[1]);
         int32_t* params = reinterpret_cast<int32_t*>(args[2]);
@@ -1421,20 +1429,61 @@ void HLEManager::register_default_stubs() {
         return 0;
     });
 
-    static uint32_t s_next_prog_id = 1;
     register_function("glCreateProgram", [](const uint64_t*) -> uint64_t {
-        return s_next_prog_id++;
+        return lcs::graphics::RenderBridge::instance().gl_create_program();
     });
-    register_function("glAttachShader", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glLinkProgram", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glUseProgram", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glDeleteProgram", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_delete_program(static_cast<uint32_t>(args[0]));
+        return 0;
+    });
+    register_function("glAttachShader", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_attach_shader(
+            static_cast<uint32_t>(args[0]), static_cast<uint32_t>(args[1]));
+        return 0;
+    });
+    register_function("glBindAttribLocation", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_bind_attrib_location(
+            static_cast<uint32_t>(args[0]), static_cast<uint32_t>(args[1]),
+            reinterpret_cast<const char*>(args[2]));
+        return 0;
+    });
+    register_function("glLinkProgram", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_link_program(static_cast<uint32_t>(args[0]));
+        return 0;
+    });
+    register_function("glUseProgram", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_use_program(static_cast<uint32_t>(args[0]));
+        return 0;
+    });
     register_function("glGetProgramiv", [](const uint64_t* args) -> uint64_t {
-        uint32_t pname = static_cast<uint32_t>(args[1]);
-        int32_t* params = reinterpret_cast<int32_t*>(args[2]);
-        if (params) {
-            if (pname == 0x8B82) *params = 1; // GL_LINK_STATUS
-            else *params = 0;
-        }
+        lcs::graphics::RenderBridge::instance().gl_get_programiv(
+            static_cast<uint32_t>(args[0]), static_cast<uint32_t>(args[1]),
+            reinterpret_cast<int32_t*>(args[2]));
+        return 0;
+    });
+    register_function("glGetActiveAttrib", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_get_active_attrib(
+            static_cast<uint32_t>(args[0]), static_cast<uint32_t>(args[1]),
+            static_cast<int32_t>(args[2]), reinterpret_cast<int32_t*>(args[3]),
+            reinterpret_cast<int32_t*>(args[4]), reinterpret_cast<uint32_t*>(args[5]),
+            reinterpret_cast<char*>(args[6]));
+        return 0;
+    });
+    register_function("glGetActiveUniform", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_get_active_uniform(
+            static_cast<uint32_t>(args[0]), static_cast<uint32_t>(args[1]),
+            static_cast<int32_t>(args[2]), reinterpret_cast<int32_t*>(args[3]),
+            reinterpret_cast<int32_t*>(args[4]), reinterpret_cast<uint32_t*>(args[5]),
+            reinterpret_cast<char*>(args[6]));
+        return 0;
+    });
+    register_function("glBlendEquation", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_blend_equation(static_cast<uint32_t>(args[0]));
+        return 0;
+    });
+    register_function("glBlendEquationSeparate", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_blend_equation_separate(
+            static_cast<uint32_t>(args[0]), static_cast<uint32_t>(args[1]));
         return 0;
     });
     register_function("glGetProgramInfoLog", [](const uint64_t* args) -> uint64_t {
@@ -1444,46 +1493,363 @@ void HLEManager::register_default_stubs() {
         if (infoLog) infoLog[0] = '\0';
         return 0;
     });
-    register_function("glGetAttribLocation", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glGetUniformLocation", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glGetAttribLocation", [](const uint64_t* args) -> uint64_t {
+        return static_cast<uint64_t>(static_cast<int64_t>(
+            lcs::graphics::RenderBridge::instance().gl_get_attrib_location(
+                static_cast<uint32_t>(args[0]), reinterpret_cast<const char*>(args[1]))));
+    });
+    register_function("glGetUniformLocation", [](const uint64_t* args) -> uint64_t {
+        return static_cast<uint64_t>(static_cast<int64_t>(
+            lcs::graphics::RenderBridge::instance().gl_get_uniform_location(
+                static_cast<uint32_t>(args[0]), reinterpret_cast<const char*>(args[1]))));
+    });
 
-    register_function("glBindTexture", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glBindBuffer", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glBindFramebuffer", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glViewport", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_viewport(
+            static_cast<int32_t>(args[0]), static_cast<int32_t>(args[1]),
+            static_cast<int32_t>(args[2]), static_cast<int32_t>(args[3]));
+        return 0;
+    });
+    register_function("glScissor", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_scissor(
+            static_cast<int32_t>(args[0]), static_cast<int32_t>(args[1]),
+            static_cast<int32_t>(args[2]), static_cast<int32_t>(args[3]));
+        return 0;
+    });
+    register_function("glClearColor", [this](const uint64_t*) -> uint64_t {
+        auto* cpu = get_active_cpu();
+        if (cpu) {
+            lcs::graphics::RenderBridge::instance().gl_clear_color(
+                cpu->get_fp_float(0), cpu->get_fp_float(1),
+                cpu->get_fp_float(2), cpu->get_fp_float(3));
+        }
+        return 0;
+    });
+    register_function("glClearDepthf", [this](const uint64_t*) -> uint64_t {
+        auto* cpu = get_active_cpu();
+        if (cpu) {
+            lcs::graphics::RenderBridge::instance().gl_clear_depth(cpu->get_fp_float(0));
+        }
+        return 0;
+    });
+    register_function("glClearStencil", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_clear_stencil(static_cast<int32_t>(args[0]));
+        return 0;
+    });
+    register_function("glClear", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_clear(static_cast<uint32_t>(args[0]));
+        return 0;
+    });
+
+    register_function("glBindTexture", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_bind_texture(
+            static_cast<uint32_t>(args[0]), static_cast<uint32_t>(args[1]));
+        return 0;
+    });
+    register_function("glBindBuffer", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_bind_buffer(
+            static_cast<uint32_t>(args[0]), static_cast<uint32_t>(args[1]));
+        return 0;
+    });
+    register_function("glBindFramebuffer", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_bind_framebuffer(
+            static_cast<uint32_t>(args[0]), static_cast<uint32_t>(args[1]));
+        return 0;
+    });
     register_function("glBindRenderbuffer", [](const uint64_t*) -> uint64_t { return 0; });
     register_function("glFramebufferTexture2D", [](const uint64_t*) -> uint64_t { return 0; });
     register_function("glRenderbufferStorage", [](const uint64_t*) -> uint64_t { return 0; });
     register_function("glFramebufferRenderbuffer", [](const uint64_t*) -> uint64_t { return 0; });
     register_function("glTexParameteri", [](const uint64_t*) -> uint64_t { return 0; });
     register_function("glTexParameterf", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glTexImage2D", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glTexSubImage2D", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glBufferData", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glBufferSubData", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glEnable", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glDisable", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glBlendFunc", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glBlendFuncSeparate", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glDepthFunc", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glDepthMask", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glColorMask", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glCullFace", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glScissor", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glVertexAttribPointer", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glEnableVertexAttribArray", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glDisableVertexAttribArray", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glUniform1i", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glUniform1f", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glUniform2f", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glUniform3f", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glUniform4f", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glUniformMatrix4fv", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glDrawArrays", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glDrawElements", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glPixelStorei", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glBindVertexArrayOES", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glTexImage2D", [this](const uint64_t* args) -> uint64_t {
+        auto* cpu = get_active_cpu();
+        const void* pixels = nullptr;
+        if (cpu) {
+            uint64_t sp = cpu->get_sp();
+            if (sp) pixels = reinterpret_cast<const void*>(*reinterpret_cast<const uint64_t*>(sp));
+        }
+        lcs::graphics::RenderBridge::instance().gl_tex_image_2d(
+            static_cast<uint32_t>(args[0]), static_cast<int32_t>(args[1]),
+            static_cast<int32_t>(args[2]), static_cast<int32_t>(args[3]),
+            static_cast<int32_t>(args[4]), static_cast<int32_t>(args[5]),
+            static_cast<uint32_t>(args[6]), static_cast<uint32_t>(args[7]),
+            pixels);
+        return 0;
+    });
+    register_function("glTexSubImage2D", [this](const uint64_t* args) -> uint64_t {
+        auto* cpu = get_active_cpu();
+        const void* pixels = nullptr;
+        if (cpu) {
+            uint64_t sp = cpu->get_sp();
+            if (sp) pixels = reinterpret_cast<const void*>(*reinterpret_cast<const uint64_t*>(sp));
+        }
+        lcs::graphics::RenderBridge::instance().gl_tex_sub_image_2d(
+            static_cast<uint32_t>(args[0]), static_cast<int32_t>(args[1]),
+            static_cast<int32_t>(args[2]), static_cast<int32_t>(args[3]),
+            static_cast<int32_t>(args[4]), static_cast<int32_t>(args[5]),
+            static_cast<uint32_t>(args[6]), static_cast<uint32_t>(args[7]),
+            pixels);
+        return 0;
+    });
+    register_function("glBufferData", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_buffer_data(
+            static_cast<uint32_t>(args[0]), static_cast<ptrdiff_t>(args[1]),
+            reinterpret_cast<const void*>(args[2]), static_cast<uint32_t>(args[3]));
+        return 0;
+    });
+    register_function("glBufferSubData", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_buffer_sub_data(
+            static_cast<uint32_t>(args[0]), static_cast<ptrdiff_t>(args[1]),
+            static_cast<ptrdiff_t>(args[2]), reinterpret_cast<const void*>(args[3]));
+        return 0;
+    });
+    register_function("glEnable", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_enable(static_cast<uint32_t>(args[0]));
+        return 0;
+    });
+    register_function("glDisable", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_disable(static_cast<uint32_t>(args[0]));
+        return 0;
+    });
+    register_function("glBlendFunc", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_blend_func(
+            static_cast<uint32_t>(args[0]), static_cast<uint32_t>(args[1]));
+        return 0;
+    });
+    register_function("glBlendFuncSeparate", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_blend_func_separate(
+            static_cast<uint32_t>(args[0]), static_cast<uint32_t>(args[1]),
+            static_cast<uint32_t>(args[2]), static_cast<uint32_t>(args[3]));
+        return 0;
+    });
+    register_function("glDepthFunc", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_depth_func(static_cast<uint32_t>(args[0]));
+        return 0;
+    });
+    register_function("glDepthMask", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_depth_mask(static_cast<uint8_t>(args[0] & 0xFF));
+        return 0;
+    });
+    register_function("glColorMask", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_color_mask(
+            static_cast<uint8_t>(args[0] & 0xFF), static_cast<uint8_t>(args[1] & 0xFF),
+            static_cast<uint8_t>(args[2] & 0xFF), static_cast<uint8_t>(args[3] & 0xFF));
+        return 0;
+    });
+    register_function("glCullFace", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_cull_face(static_cast<uint32_t>(args[0]));
+        return 0;
+    });
+    register_function("glFrontFace", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_front_face(static_cast<uint32_t>(args[0]));
+        return 0;
+    });
+    register_function("glVertexAttribPointer", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_vertex_attrib_pointer(
+            static_cast<uint32_t>(args[0]), static_cast<int32_t>(args[1]),
+            static_cast<uint32_t>(args[2]), static_cast<uint8_t>(args[3] & 0xFF),
+            static_cast<int32_t>(args[4]), args[5]);
+        return 0;
+    });
+    register_function("glVertexAttrib1f", [this](const uint64_t* args) -> uint64_t {
+        auto* cpu = get_active_cpu();
+        if (cpu) lcs::graphics::RenderBridge::instance().gl_vertex_attrib4f(
+            static_cast<uint32_t>(args[0]), cpu->get_fp_float(0), 0.0f, 0.0f, 1.0f);
+        return 0;
+    });
+    register_function("glVertexAttrib2f", [this](const uint64_t* args) -> uint64_t {
+        auto* cpu = get_active_cpu();
+        if (cpu) lcs::graphics::RenderBridge::instance().gl_vertex_attrib4f(
+            static_cast<uint32_t>(args[0]), cpu->get_fp_float(0), cpu->get_fp_float(1), 0.0f, 1.0f);
+        return 0;
+    });
+    register_function("glVertexAttrib3f", [this](const uint64_t* args) -> uint64_t {
+        auto* cpu = get_active_cpu();
+        if (cpu) lcs::graphics::RenderBridge::instance().gl_vertex_attrib4f(
+            static_cast<uint32_t>(args[0]), cpu->get_fp_float(0), cpu->get_fp_float(1), cpu->get_fp_float(2), 1.0f);
+        return 0;
+    });
+    register_function("glVertexAttrib4f", [this](const uint64_t* args) -> uint64_t {
+        auto* cpu = get_active_cpu();
+        if (cpu) lcs::graphics::RenderBridge::instance().gl_vertex_attrib4f(
+            static_cast<uint32_t>(args[0]), cpu->get_fp_float(0), cpu->get_fp_float(1),
+            cpu->get_fp_float(2), cpu->get_fp_float(3));
+        return 0;
+    });
+    register_function("glVertexAttrib1fv", [](const uint64_t* args) -> uint64_t {
+        const float* v = reinterpret_cast<const float*>(args[1]);
+        if (v) lcs::graphics::RenderBridge::instance().gl_vertex_attrib4f(static_cast<uint32_t>(args[0]), v[0], 0.0f, 0.0f, 1.0f);
+        return 0;
+    });
+    register_function("glVertexAttrib2fv", [](const uint64_t* args) -> uint64_t {
+        const float* v = reinterpret_cast<const float*>(args[1]);
+        if (v) lcs::graphics::RenderBridge::instance().gl_vertex_attrib4f(static_cast<uint32_t>(args[0]), v[0], v[1], 0.0f, 1.0f);
+        return 0;
+    });
+    register_function("glVertexAttrib3fv", [](const uint64_t* args) -> uint64_t {
+        const float* v = reinterpret_cast<const float*>(args[1]);
+        if (v) lcs::graphics::RenderBridge::instance().gl_vertex_attrib4f(static_cast<uint32_t>(args[0]), v[0], v[1], v[2], 1.0f);
+        return 0;
+    });
+    register_function("glVertexAttrib4fv", [](const uint64_t* args) -> uint64_t {
+        const float* v = reinterpret_cast<const float*>(args[1]);
+        if (v) lcs::graphics::RenderBridge::instance().gl_vertex_attrib4f(static_cast<uint32_t>(args[0]), v[0], v[1], v[2], v[3]);
+        return 0;
+    });
+    register_function("glEnableVertexAttribArray", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_enable_vertex_attrib_array(static_cast<uint32_t>(args[0]));
+        return 0;
+    });
+    register_function("glDisableVertexAttribArray", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_disable_vertex_attrib_array(static_cast<uint32_t>(args[0]));
+        return 0;
+    });
+    register_function("glUniform1i", [](const uint64_t* args) -> uint64_t {
+        int32_t v = static_cast<int32_t>(args[1]);
+        lcs::graphics::RenderBridge::instance().gl_uniform_iv(static_cast<int32_t>(args[0]), 1, 1, &v);
+        return 0;
+    });
+    register_function("glUniform2i", [](const uint64_t* args) -> uint64_t {
+        int32_t v[2] = {static_cast<int32_t>(args[1]), static_cast<int32_t>(args[2])};
+        lcs::graphics::RenderBridge::instance().gl_uniform_iv(static_cast<int32_t>(args[0]), 1, 2, v);
+        return 0;
+    });
+    register_function("glUniform3i", [](const uint64_t* args) -> uint64_t {
+        int32_t v[3] = {static_cast<int32_t>(args[1]), static_cast<int32_t>(args[2]), static_cast<int32_t>(args[3])};
+        lcs::graphics::RenderBridge::instance().gl_uniform_iv(static_cast<int32_t>(args[0]), 1, 3, v);
+        return 0;
+    });
+    register_function("glUniform4i", [](const uint64_t* args) -> uint64_t {
+        int32_t v[4] = {static_cast<int32_t>(args[1]), static_cast<int32_t>(args[2]), static_cast<int32_t>(args[3]), static_cast<int32_t>(args[4])};
+        lcs::graphics::RenderBridge::instance().gl_uniform_iv(static_cast<int32_t>(args[0]), 1, 4, v);
+        return 0;
+    });
+    register_function("glUniform1iv", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_uniform_iv(
+            static_cast<int32_t>(args[0]), static_cast<int32_t>(args[1]), 1, reinterpret_cast<const int32_t*>(args[2]));
+        return 0;
+    });
+    register_function("glUniform2iv", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_uniform_iv(
+            static_cast<int32_t>(args[0]), static_cast<int32_t>(args[1]), 2, reinterpret_cast<const int32_t*>(args[2]));
+        return 0;
+    });
+    register_function("glUniform3iv", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_uniform_iv(
+            static_cast<int32_t>(args[0]), static_cast<int32_t>(args[1]), 3, reinterpret_cast<const int32_t*>(args[2]));
+        return 0;
+    });
+    register_function("glUniform4iv", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_uniform_iv(
+            static_cast<int32_t>(args[0]), static_cast<int32_t>(args[1]), 4, reinterpret_cast<const int32_t*>(args[2]));
+        return 0;
+    });
+    register_function("glUniform1f", [this](const uint64_t* args) -> uint64_t {
+        auto* cpu = get_active_cpu();
+        if (cpu) {
+            float v = cpu->get_fp_float(0);
+            lcs::graphics::RenderBridge::instance().gl_uniform_fv(static_cast<int32_t>(args[0]), 1, 1, &v);
+        }
+        return 0;
+    });
+    register_function("glUniform2f", [this](const uint64_t* args) -> uint64_t {
+        auto* cpu = get_active_cpu();
+        if (cpu) {
+            float v[2] = {cpu->get_fp_float(0), cpu->get_fp_float(1)};
+            lcs::graphics::RenderBridge::instance().gl_uniform_fv(static_cast<int32_t>(args[0]), 1, 2, v);
+        }
+        return 0;
+    });
+    register_function("glUniform3f", [this](const uint64_t* args) -> uint64_t {
+        auto* cpu = get_active_cpu();
+        if (cpu) {
+            float v[3] = {cpu->get_fp_float(0), cpu->get_fp_float(1), cpu->get_fp_float(2)};
+            lcs::graphics::RenderBridge::instance().gl_uniform_fv(static_cast<int32_t>(args[0]), 1, 3, v);
+        }
+        return 0;
+    });
+    register_function("glUniform4f", [this](const uint64_t* args) -> uint64_t {
+        auto* cpu = get_active_cpu();
+        if (cpu) {
+            float v[4] = {cpu->get_fp_float(0), cpu->get_fp_float(1), cpu->get_fp_float(2), cpu->get_fp_float(3)};
+            lcs::graphics::RenderBridge::instance().gl_uniform_fv(static_cast<int32_t>(args[0]), 1, 4, v);
+        }
+        return 0;
+    });
+    register_function("glUniform1fv", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_uniform_fv(
+            static_cast<int32_t>(args[0]), static_cast<int32_t>(args[1]), 1, reinterpret_cast<const float*>(args[2]));
+        return 0;
+    });
+    register_function("glUniform2fv", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_uniform_fv(
+            static_cast<int32_t>(args[0]), static_cast<int32_t>(args[1]), 2, reinterpret_cast<const float*>(args[2]));
+        return 0;
+    });
+    register_function("glUniform3fv", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_uniform_fv(
+            static_cast<int32_t>(args[0]), static_cast<int32_t>(args[1]), 3, reinterpret_cast<const float*>(args[2]));
+        return 0;
+    });
+    register_function("glUniform4fv", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_uniform_fv(
+            static_cast<int32_t>(args[0]), static_cast<int32_t>(args[1]), 4, reinterpret_cast<const float*>(args[2]));
+        return 0;
+    });
+    register_function("glUniformMatrix2fv", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_uniform_matrix_fv(
+            static_cast<int32_t>(args[0]), static_cast<int32_t>(args[1]), 2,
+            static_cast<uint8_t>(args[2] & 0xFF), reinterpret_cast<const float*>(args[3]));
+        return 0;
+    });
+    register_function("glUniformMatrix3fv", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_uniform_matrix_fv(
+            static_cast<int32_t>(args[0]), static_cast<int32_t>(args[1]), 3,
+            static_cast<uint8_t>(args[2] & 0xFF), reinterpret_cast<const float*>(args[3]));
+        return 0;
+    });
+    register_function("glUniformMatrix4fv", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_uniform_matrix_fv(
+            static_cast<int32_t>(args[0]), static_cast<int32_t>(args[1]), 4,
+            static_cast<uint8_t>(args[2] & 0xFF), reinterpret_cast<const float*>(args[3]));
+        return 0;
+    });
+    register_function("glDrawArrays", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_draw_arrays(
+            static_cast<uint32_t>(args[0]), static_cast<int32_t>(args[1]), static_cast<int32_t>(args[2]));
+        return 0;
+    });
+    register_function("glDrawElements", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_draw_elements(
+            static_cast<uint32_t>(args[0]), static_cast<int32_t>(args[1]),
+            static_cast<uint32_t>(args[2]), reinterpret_cast<const void*>(args[3]));
+        return 0;
+    });
+    register_function("glGetIntegerv", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_get_integerv(
+            static_cast<uint32_t>(args[0]), reinterpret_cast<int32_t*>(args[1]));
+        return 0;
+    });
+    register_function("glGetFloatv", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_get_floatv(
+            static_cast<uint32_t>(args[0]), reinterpret_cast<float*>(args[1]));
+        return 0;
+    });
+    register_function("glGetBooleanv", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_get_booleanv(
+            static_cast<uint32_t>(args[0]), reinterpret_cast<uint8_t*>(args[1]));
+        return 0;
+    });
     register_function("glFlush", [](const uint64_t*) -> uint64_t { return 0; });
     register_function("glFinish", [](const uint64_t*) -> uint64_t { return 0; });
     register_function("glGetError", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glActiveTexture", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glActiveTexture", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_active_texture(static_cast<uint32_t>(args[0]));
+        return 0;
+    });
 
     // Timing & System
     register_function("clock_gettime", [](const uint64_t* args) -> uint64_t {

@@ -537,6 +537,26 @@ uint64_t JNIBridge::handle_call_method(uint64_t target, uint64_t method_handle, 
         // Return a dummy view handle
         return JNI_GUEST_HEAP_BASE + 0x2000;
     }
+    else if (m.methodName == "PlaylistBeginInit") {
+        m_pending.playlist_finish_init = true;
+        return 0;
+    }
+    else if (m.methodName == "GameLoad") {
+        m_pending.game_loaded = true;
+        return 0;
+    }
+    else if (m.methodName == "ShowGateBeforeLoad") {
+        m_pending.start_game_before_load = true;
+        return 0;
+    }
+    else if (m.methodName == "ShowGate") {
+        m_pending.start_game = true;
+        return 0;
+    }
+    else if (m.methodName == "QuitApp") {
+        m_pending.quit_requested = true;
+        return 0;
+    }
     else if (m.methodName == "readUserFile") {
         uint64_t str_handle = args[3];
         const char* fname = get_string_utf_chars(str_handle);
@@ -655,6 +675,12 @@ const char* JNIBridge::get_string_utf_chars(uint64_t string_obj) {
         return reinterpret_cast<const char*>(string_obj);
     }
     return "";
+}
+
+JNIBridge::PendingCallbacks JNIBridge::consume_pending_callbacks() {
+    PendingCallbacks out = m_pending;
+    m_pending = PendingCallbacks{};
+    return out;
 }
 
 } // namespace lcs::os

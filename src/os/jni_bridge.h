@@ -57,6 +57,15 @@ public:
     // Callbacks from libGame.so
     void set_userdata_dir(const std::string& path) { m_userdata_dir = path; }
 
+    struct PendingCallbacks {
+        bool playlist_finish_init = false;
+        bool game_loaded = false;
+        bool start_game_before_load = false;
+        bool start_game = false;
+        bool quit_requested = false;
+    };
+    PendingCallbacks consume_pending_callbacks();
+
 private:
     JNIBridge();
     ~JNIBridge();
@@ -86,6 +95,7 @@ private:
     std::unordered_map<uint64_t, std::string> m_string_objects;
     std::unordered_map<uint64_t, std::vector<uint8_t>> m_byte_arrays;
     std::unordered_map<uint64_t, std::vector<uint64_t>> m_object_arrays;
+    PendingCallbacks m_pending;
 };
 
 } // namespace lcs::os

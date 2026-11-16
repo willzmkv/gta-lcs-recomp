@@ -25,7 +25,7 @@ namespace lcs::cpu {
 
 static constexpr uint64_t MAGIC_RETURN_PC = 0x7f00100000ULL;
 static constexpr uint64_t GUEST_STACK_TOP = 0x7f601f0000ULL;
-static constexpr uint32_t RETURN_SVC_ID   = 0x000000ff;
+static constexpr uint32_t RETURN_SVC_ID   = 0x0000ffff;
 
 class CoreCallbacks : public Dynarmic::A64::UserCallbacks {
 public:
