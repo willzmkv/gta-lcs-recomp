@@ -20,6 +20,8 @@
 #include "graphics/window.h"
 #include "graphics/render_bridge.h"
 #include "input/input_system.h"
+#include "audio/audio_system.h"
+#include "audio/openal_bridge.h"
 
 static lcs::cpu::DynarmicCore* s_active_cpu = nullptr;
 
@@ -93,7 +95,7 @@ int main(int argc, char* argv[]) {
             headless = true;
         } else if (arg == "--dump-render") {
             dump_render = true;
-        } else if (arg == "--max-frames" && i + 1 < argc) {
+        } else if ((arg == "--max-frames" || arg == "--frames") && i + 1 < argc) {
             max_frames = std::strtoull(argv[++i], nullptr, 10);
         } else if (arg == "--width" && i + 1 < argc) {
             win_width = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));
@@ -189,6 +191,9 @@ int main(int argc, char* argv[]) {
     auto resolver = [&](const char* name, uint8_t binding) -> uint64_t {
         (void)binding;
         uint64_t addr = 0;
+        if (lcs::audio::is_openal_symbol(name)) {
+            return lcs::cpu::HLEManager::instance().resolve(name);
+        }
         if (image_openal.is_loaded()) {
             addr = image_openal.find_symbol(name);
             if (addr) return addr;
@@ -412,7 +417,8 @@ int main(int argc, char* argv[]) {
         std::cout << "  [8] isInitialized() -> " << (is_init ? "TRUE [PASS]" : "FALSE [FAIL]") << "\n";
     }
 
-    std::cout << "\n[Step 9] Initializing Native Desktop Window & Direct3D 12 Swapchain...\n";
+    std::cout << "\n[Step 9] Initializing Native Desktop Window, Direct3D 12 Swapchain & Audio...\n";
+    lcs::audio::init_audio_system();
     void* native_window = nullptr;
     if (!headless) {
         if (!lcs::graphics::create_game_window(
@@ -582,6 +588,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    lcs::audio::shutdown_audio_system();
     lcs::graphics::RenderBridge::instance().shutdown();
     if (!headless) {
         lcs::graphics::destroy_game_window();

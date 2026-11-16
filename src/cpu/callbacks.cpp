@@ -1,6 +1,7 @@
 #include "callbacks.h"
 #include "dynarmic_core.h"
 #include "graphics/render_bridge.h"
+#include "audio/openal_bridge.h"
 #include "os/bionic_libc.h"
 #include "os/thread_manager.h"
 #include <iostream>
@@ -1925,6 +1926,8 @@ void HLEManager::register_default_stubs() {
     register_function("_ZTHN10ALCcontext13sLocalContextE", [](const uint64_t*) -> uint64_t {
         return 0;
     });
+
+    lcs::audio::register_openal_hle(*this);
 }
 
 } // namespace lcs::cpu
