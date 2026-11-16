@@ -78,11 +78,41 @@ static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ep) {
         std::cerr << std::dec << std::flush;
         std::cout << std::flush;
     }
+
+    char crash_msg[512];
+    snprintf(crash_msg, sizeof(crash_msg),
+             "Fatal hardware exception (0x%08X) at address 0x%p.\n\nPlease check the console or log for details.",
+             static_cast<unsigned int>(rec->ExceptionCode), rec->ExceptionAddress);
+    MessageBoxA(nullptr, crash_msg, "GTA: Liberty City Stories - Fatal Error", MB_ICONERROR | MB_OK);
+
     ExitProcess(1);
 }
 #endif
 
 int main(int argc, char* argv[]) {
+    // Automatically detect project root directory (handles launching from build/bin/Release, Desktop shortcut, etc.)
+    auto resolve_project_root = []() {
+        if (std::filesystem::exists("gtalcs/gamefiles/android-libs/libGame.so")) {
+            return;
+        }
+#if defined(LCS_PLATFORM_WINDOWS)
+        wchar_t exe_buf[MAX_PATH];
+        if (GetModuleFileNameW(nullptr, exe_buf, MAX_PATH) > 0) {
+            std::filesystem::path cur = std::filesystem::path(exe_buf).parent_path();
+            for (int i = 0; i < 5; i++) {
+                if (std::filesystem::exists(cur / "gtalcs/gamefiles/android-libs/libGame.so")) {
+                    std::filesystem::current_path(cur);
+                    std::wcout << L"[Init] Switched working directory to: " << cur.wstring() << L"\n";
+                    return;
+                }
+                if (!cur.has_parent_path() || cur == cur.parent_path()) break;
+                cur = cur.parent_path();
+            }
+        }
+#endif
+    };
+    resolve_project_root();
+
     bool headless = false;
     bool dump_render = false;
     uint64_t max_frames = 0;
@@ -129,6 +159,13 @@ int main(int argc, char* argv[]) {
 
     if (!std::filesystem::exists(game_so)) {
         std::cerr << "[ERROR] Game binary not found: " << game_so << "\n";
+#if defined(LCS_PLATFORM_WINDOWS)
+        if (!headless) {
+            std::wstring msg = L"Game binary not found:\n" + std::filesystem::absolute(game_so).wstring() +
+                               L"\n\nPlease ensure game assets are extracted into gtalcs/gamefiles/.";
+            MessageBoxW(nullptr, msg.c_str(), L"GTA: Liberty City Stories", MB_ICONERROR | MB_OK);
+        }
+#endif
         return 1;
     }
 

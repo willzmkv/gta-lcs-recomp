@@ -188,6 +188,13 @@ if(EXISTS "${DYNARMIC_ROOT}/src/dynarmic/src")
     endif()
 endif()
 
+# Deploy executable to project root for direct execution
+add_custom_command(TARGET lcs POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:lcs>
+    "${CMAKE_SOURCE_DIR}/lcs.exe"
+)
+
 message(STATUS "GTA: Liberty City Stories Native PC Port configured.")
 message(STATUS "  Platform:     ${CMAKE_SYSTEM_NAME} (${CMAKE_SYSTEM_PROCESSOR})")
 message(STATUS "  Direct3D 12:  ${ENABLE_D3D12}")

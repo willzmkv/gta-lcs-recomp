@@ -59,6 +59,17 @@ def build(cmake_exe, opt_mode="lto"):
     print(f"Building with: {' '.join(cmd)}")
     subprocess.check_call(cmd)
 
+    # Ensure binary is in project root for seamless double-click execution
+    cfg = "Release" if opt_mode != "debug" else "Debug"
+    built_exe = os.path.join(BUILD_DIR, "bin", cfg, "lcs.exe")
+    root_exe = os.path.join(ROOT, "lcs.exe")
+    if os.path.isfile(built_exe):
+        try:
+            shutil.copy2(built_exe, root_exe)
+            print(f"Deployed executable to project root: {root_exe}")
+        except Exception as e:
+            print(f"Warning: could not copy to {root_exe}: {e}")
+
 def clean():
     if os.path.exists(BUILD_DIR):
         print(f"Removing build directory: {BUILD_DIR}")

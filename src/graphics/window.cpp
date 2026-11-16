@@ -260,6 +260,8 @@ bool create_game_window(int width, int height, const char* title) {
 
     ShowWindow(g_win.hwnd, SW_SHOW);
     UpdateWindow(g_win.hwnd);
+    SetForegroundWindow(g_win.hwnd);
+    SetFocus(g_win.hwnd);
 
     std::cout << "[Window] Created native Win32 window (" << g_win.width << "x" << g_win.height << ")\n";
     return true;
