@@ -140,6 +140,23 @@ elseif(UNIX)
     )
 endif()
 
+# SDL3 Gamepad, DualSense & Platform layer
+set(SDL3_ROOT "D:/Games/VCS Recomp/deps/SDL3" CACHE PATH "Path to SDL3 headers")
+set(SDL3_LIB "D:/Games/VCS Recomp/build/release/_deps/sdl3-build/SDL3-static.lib" CACHE FILEPATH "Path to SDL3 static lib")
+if(EXISTS "${SDL3_ROOT}/include/SDL3/SDL.h" AND EXISTS "${SDL3_LIB}")
+    message(STATUS "Found precompiled SDL3: ${SDL3_LIB}")
+    target_include_directories(lcs PRIVATE "${SDL3_ROOT}/include")
+    target_link_libraries(lcs PRIVATE
+        "${SDL3_LIB}"
+        winmm
+        imm32
+        version
+        setupapi
+        cfgmgr32
+    )
+    add_compile_definitions(LCS_HAS_SDL3=1)
+endif()
+
 # Dynarmic ARM64 JIT
 set(DYNARMIC_ROOT "D:/Games/Lichii-nx2/Lichii-nx2" CACHE PATH "Path to Dynarmic")
 if(EXISTS "${DYNARMIC_ROOT}/src/dynarmic/src")

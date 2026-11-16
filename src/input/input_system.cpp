@@ -1,4 +1,5 @@
 #include "input_system.h"
+#include "gamepad.h"
 #include "cpu/dynarmic_core.h"
 
 #include <iostream>
@@ -39,6 +40,8 @@ void InputSystem::init(uint64_t fn_touch_start,
     m_fn_back_button = fn_back_button;
     m_initialized = true;
 
+    GamepadDriver::instance().initialize();
+
     std::cout << "[Input] InputSystem initialized with native JNI entry points.\n" << std::flush;
 }
 
@@ -78,6 +81,11 @@ void InputSystem::queue_back_button() {
 }
 
 void InputSystem::poll_gamepad() {
+    GamepadDriver::instance().poll();
+    if (GamepadDriver::instance().is_connected()) {
+        return;
+    }
+
 #if defined(LCS_PLATFORM_WINDOWS)
     static HMODULE s_xinput = nullptr;
     static XInputGetStateFn s_get_state = nullptr;
