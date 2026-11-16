@@ -283,6 +283,9 @@ void OpenALBridge::al_source_queue_buffers(uint32_t source, int nb, const uint32
         src.queue.push_back(buffers[i]);
     }
     src.is_streaming = true;
+    if (src.state == AL_STOPPED && src.queue_idx < src.queue.size()) {
+        src.state = AL_PLAYING;
+    }
 }
 
 void OpenALBridge::al_source_unqueue_buffers(uint32_t source, int nb, uint32_t* buffers) {
@@ -409,6 +412,10 @@ void OpenALBridge::mix_samples(int16_t* out_interleaved, size_t frame_count, uin
                 if (src.looping && !src.queue.empty()) {
                     src.queue_idx = 0;
                     src.sample_pos = 0.0;
+                } else if (src.is_streaming) {
+                    // Buffer underrun during audio stream decoding: remain in playing state
+                    // and wait smoothly for the decoder thread to queue more frames.
+                    break;
                 } else {
                     src.state = AL_STOPPED;
                     break;
@@ -430,20 +437,30 @@ void OpenALBridge::mix_samples(int16_t* out_interleaved, size_t frame_count, uin
             }
 
             size_t idx0 = static_cast<size_t>(src.sample_pos);
-            size_t idx1 = (idx0 + 1 < total_frames) ? (idx0 + 1) : idx0;
+            size_t idx1 = idx0 + 1;
             float frac = static_cast<float>(src.sample_pos - idx0);
+
+            // Interpolate across buffer boundaries if next buffer is queued (eliminates clicks/pops)
+            const ALBuffer* next_buf = nullptr;
+            if (idx1 >= total_frames && src.queue_idx + 1 < src.queue.size()) {
+                auto nbit = m_buffers.find(src.queue[src.queue_idx + 1]);
+                if (nbit != m_buffers.end()) next_buf = &nbit->second;
+            }
 
             if (buf.channels == 1) {
                 float s0 = buf.samples[idx0];
-                float s1 = buf.samples[idx1];
+                float s1 = (idx1 < total_frames) ? buf.samples[idx1] :
+                           (next_buf && !next_buf->samples.empty() ? next_buf->samples[0] : s0);
                 float s = s0 + frac * (s1 - s0);
                 acc_l[f] += s * eff_gain * att * pan_l;
                 acc_r[f] += s * eff_gain * att * pan_r;
             } else {
                 float s0_l = buf.samples[idx0 * 2];
                 float s0_r = buf.samples[idx0 * 2 + 1];
-                float s1_l = buf.samples[idx1 * 2];
-                float s1_r = buf.samples[idx1 * 2 + 1];
+                float s1_l = (idx1 < total_frames) ? buf.samples[idx1 * 2] :
+                             (next_buf && next_buf->samples.size() >= 2 ? next_buf->samples[0] : s0_l);
+                float s1_r = (idx1 < total_frames) ? buf.samples[idx1 * 2 + 1] :
+                             (next_buf && next_buf->samples.size() >= 2 ? next_buf->samples[1] : s0_r);
                 float sl = s0_l + frac * (s1_l - s0_l);
                 float sr = s0_r + frac * (s1_r - s0_r);
                 acc_l[f] += sl * eff_gain * att;
@@ -460,13 +477,25 @@ void OpenALBridge::mix_samples(int16_t* out_interleaved, size_t frame_count, uin
         }
     }
 
-    // Apply master listener gain and convert to 16-bit PCM output
+    // Master listener gain and soft-knee limiter (prevents harsh digital clipping/distortion)
+    auto soft_limit = [](float x) -> int16_t {
+        constexpr float kMax = 32767.0f;
+        float norm = x / kMax;
+        if (norm > 0.7f) {
+            norm = 0.7f + 0.3f * std::tanh((norm - 0.7f) / 0.3f);
+        } else if (norm < -0.7f) {
+            norm = -0.7f + 0.3f * std::tanh((norm + 0.7f) / 0.3f);
+        }
+        float out = norm * kMax;
+        return static_cast<int16_t>(std::clamp(out, -32768.0f, 32767.0f));
+    };
+
     float master_gain = m_listener.gain;
     for (size_t i = 0; i < frame_count; i++) {
         float fl = acc_l[i] * master_gain;
         float fr = acc_r[i] * master_gain;
-        out_interleaved[i * 2]     = static_cast<int16_t>(std::clamp(fl, -32768.0f, 32767.0f));
-        out_interleaved[i * 2 + 1] = static_cast<int16_t>(std::clamp(fr, -32768.0f, 32767.0f));
+        out_interleaved[i * 2]     = soft_limit(fl);
+        out_interleaved[i * 2 + 1] = soft_limit(fr);
     }
 }
 

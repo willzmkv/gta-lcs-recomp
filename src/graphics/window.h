@@ -28,6 +28,9 @@ void set_window_resize_callback(ResizeCallback cb);
 // Updates the window title bar text.
 void set_window_title(const char* title);
 
+// Retrieves pending resize dimensions if a window resize occurred, clearing the pending flag.
+bool get_pending_resize(uint32_t& out_w, uint32_t& out_h);
+
 // Returns true if the window is currently alive and not closed.
 bool is_window_open();
 

@@ -236,6 +236,14 @@ std::vector<uint8_t> unpack_pixels_to_rgba8(uint32_t width, uint32_t height,
     } else if (format == 0x1908) {
         // GL_RGBA + GL_UNSIGNED_BYTE
         std::memcpy(rgba.data(), src8, count * 4);
+    } else if (format == 0x80E1) {
+        // GL_BGRA_EXT (Android/mobile BGRA buffers)
+        for (size_t i = 0; i < count; i++) {
+            rgba[i * 4 + 0] = src8[i * 4 + 2];
+            rgba[i * 4 + 1] = src8[i * 4 + 1];
+            rgba[i * 4 + 2] = src8[i * 4 + 0];
+            rgba[i * 4 + 3] = src8[i * 4 + 3];
+        }
     } else if (format == 0x1907) {
         // GL_RGB
         for (size_t i = 0; i < count; i++) {

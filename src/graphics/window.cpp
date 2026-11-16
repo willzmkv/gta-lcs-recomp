@@ -2,6 +2,8 @@
 #include "input/input_system.h"
 
 #include <iostream>
+#include <algorithm>
+#include <cmath>
 
 #if defined(LCS_PLATFORM_WINDOWS)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -26,9 +28,42 @@ struct WindowState {
     uint32_t height = 720;
     bool open = false;
     ResizeCallback on_resize;
+    bool pending_resize = false;
+    uint32_t new_width = 1280;
+    uint32_t new_height = 720;
 };
 
 WindowState g_win;
+
+// Keyboard analog stick simulation state
+static bool s_key_w = false;
+static bool s_key_s = false;
+static bool s_key_a = false;
+static bool s_key_d = false;
+static bool s_key_up = false;
+static bool s_key_down = false;
+static bool s_key_left = false;
+static bool s_key_right = false;
+static float s_prev_stick_x = 0.0f;
+static float s_prev_stick_y = 0.0f;
+
+static void update_keyboard_movement_axes() {
+    float sx = 0.0f;
+    float sy = 0.0f;
+    if (s_key_d || s_key_right) sx += 1.0f;
+    if (s_key_a || s_key_left)  sx -= 1.0f;
+    if (s_key_s || s_key_down)  sy += 1.0f;
+    if (s_key_w || s_key_up)    sy -= 1.0f;
+
+    if (sx != s_prev_stick_x) {
+        s_prev_stick_x = sx;
+        lcs::input::InputSystem::instance().queue_joy_axis(0, 0, sx);
+    }
+    if (sy != s_prev_stick_y) {
+        s_prev_stick_y = sy;
+        lcs::input::InputSystem::instance().queue_joy_axis(0, 1, sy);
+    }
+}
 
 #if defined(LCS_PLATFORM_WINDOWS)
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -40,6 +75,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 if (new_w > 0 && new_h > 0 && (new_w != g_win.width || new_h != g_win.height)) {
                     g_win.width = new_w;
                     g_win.height = new_h;
+                    g_win.pending_resize = true;
+                    g_win.new_width = new_w;
+                    g_win.new_height = new_h;
                     if (g_win.on_resize) {
                         g_win.on_resize(new_w, new_h);
                     }
@@ -54,16 +92,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             float ny = (g_win.height > 0) ? static_cast<float>(y) / static_cast<float>(g_win.height) : 0.0f;
             SetCapture(hwnd);
             lcs::input::InputSystem::instance().queue_touch_down(0, nx, ny);
-            return 0;
-        }
-        case WM_MOUSEMOVE: {
-            if (wparam & MK_LBUTTON) {
-                int x = static_cast<short>(LOWORD(lparam));
-                int y = static_cast<short>(HIWORD(lparam));
-                float nx = (g_win.width > 0) ? static_cast<float>(x) / static_cast<float>(g_win.width) : 0.0f;
-                float ny = (g_win.height > 0) ? static_cast<float>(y) / static_cast<float>(g_win.height) : 0.0f;
-                lcs::input::InputSystem::instance().queue_touch_move(0, nx, ny);
-            }
+            // Also map left click to in-game attack/fire (Circle / Button 1)
+            lcs::input::InputSystem::instance().queue_joy_button_down(0, 1);
             return 0;
         }
         case WM_LBUTTONUP: {
@@ -73,48 +103,130 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             float ny = (g_win.height > 0) ? static_cast<float>(y) / static_cast<float>(g_win.height) : 0.0f;
             ReleaseCapture();
             lcs::input::InputSystem::instance().queue_touch_up(0, nx, ny);
+            lcs::input::InputSystem::instance().queue_joy_button_up(0, 1);
+            return 0;
+        }
+        case WM_RBUTTONDOWN: {
+            // Right-click: Target lock / Aim / Handbrake (R1 / Button 5)
+            lcs::input::InputSystem::instance().queue_joy_button_down(0, 5);
+            return 0;
+        }
+        case WM_RBUTTONUP: {
+            lcs::input::InputSystem::instance().queue_joy_button_up(0, 5);
+            return 0;
+        }
+        case WM_MOUSEWHEEL: {
+            short delta = GET_WHEEL_DELTA_WPARAM(wparam);
+            if (delta > 0) {
+                // Next weapon / menu scroll up (D-Pad Right - button 13)
+                lcs::input::InputSystem::instance().queue_joy_button_down(0, 13);
+                lcs::input::InputSystem::instance().queue_joy_button_up(0, 13);
+            } else if (delta < 0) {
+                // Prev weapon / menu scroll down (D-Pad Left - button 12)
+                lcs::input::InputSystem::instance().queue_joy_button_down(0, 12);
+                lcs::input::InputSystem::instance().queue_joy_button_up(0, 12);
+            }
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            int x = static_cast<short>(LOWORD(lparam));
+            int y = static_cast<short>(HIWORD(lparam));
+            float nx = (g_win.width > 0) ? static_cast<float>(x) / static_cast<float>(g_win.width) : 0.0f;
+            float ny = (g_win.height > 0) ? static_cast<float>(y) / static_cast<float>(g_win.height) : 0.0f;
+            if (wparam & MK_LBUTTON) {
+                lcs::input::InputSystem::instance().queue_touch_move(0, nx, ny);
+            }
+            // Mouse camera aim look: Right stick (Axis 2 = X, Axis 3 = Y)
+            static int s_last_mouse_x = -1;
+            static int s_last_mouse_y = -1;
+            if (s_last_mouse_x >= 0 && s_last_mouse_y >= 0) {
+                int dx = x - s_last_mouse_x;
+                int dy = y - s_last_mouse_y;
+                float cam_x = std::clamp(static_cast<float>(dx) * 0.05f, -1.0f, 1.0f);
+                float cam_y = std::clamp(static_cast<float>(dy) * 0.05f, -1.0f, 1.0f);
+                if (std::abs(cam_x) > 0.01f || std::abs(cam_y) > 0.01f) {
+                    lcs::input::InputSystem::instance().queue_joy_axis(0, 2, cam_x);
+                    lcs::input::InputSystem::instance().queue_joy_axis(0, 3, cam_y);
+                }
+            }
+            s_last_mouse_x = x;
+            s_last_mouse_y = y;
             return 0;
         }
         case WM_KEYDOWN: {
             if (lparam & (1 << 30)) return 0; // Ignore autorepeat
             switch (wparam) {
+                case 'W':
+                    s_key_w = true;
+                    update_keyboard_movement_axes();
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 10); // Up
+                    break;
+                case 'S':
+                    s_key_s = true;
+                    update_keyboard_movement_axes();
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 11); // Down
+                    break;
+                case 'A':
+                    s_key_a = true;
+                    update_keyboard_movement_axes();
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 12); // Left
+                    break;
+                case 'D':
+                    s_key_d = true;
+                    update_keyboard_movement_axes();
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 13); // Right
+                    break;
+                case VK_UP:
+                    s_key_up = true;
+                    update_keyboard_movement_axes();
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 10);
+                    break;
+                case VK_DOWN:
+                    s_key_down = true;
+                    update_keyboard_movement_axes();
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 11);
+                    break;
+                case VK_LEFT:
+                    s_key_left = true;
+                    update_keyboard_movement_axes();
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 12);
+                    break;
+                case VK_RIGHT:
+                    s_key_right = true;
+                    update_keyboard_movement_axes();
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 13);
+                    break;
                 case VK_RETURN:
                 case VK_SPACE:
-                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 0); // Cross / A
+                    // Menu select / Sprint / Accelerate (Cross / A - Button 0)
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 0);
                     break;
                 case VK_ESCAPE:
                     lcs::input::InputSystem::instance().queue_back_button();
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 7); // Start
                     break;
                 case VK_BACK:
                     lcs::input::InputSystem::instance().queue_joy_button_down(0, 1); // Circle / B
                     break;
-                case VK_UP:
-                case 'W':
-                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 10); // Up
-                    break;
-                case VK_DOWN:
-                case 'S':
-                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 11); // Down
-                    break;
-                case VK_LEFT:
-                case 'A':
-                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 12); // Left
-                    break;
-                case VK_RIGHT:
-                case 'D':
-                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 13); // Right
-                    break;
                 case VK_TAB:
-                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 7); // Start
+                case 'M':
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 7); // Start / Map
                     break;
                 case VK_SHIFT:
-                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 5); // R1
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 0); // Sprint (Cross)
                     break;
                 case VK_CONTROL:
-                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 2); // Square
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 2); // Jump / Brake (Square)
                     break;
                 case 'F':
-                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 3); // Triangle
+                case 'E':
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 3); // Enter/Exit Vehicle (Triangle)
+                    break;
+                case 'C':
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 9); // Look Behind / Crouch (R3)
+                    break;
+                case 'R':
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 1); // Attack (Circle)
                     break;
                 default:
                     break;
@@ -123,6 +235,46 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         }
         case WM_KEYUP: {
             switch (wparam) {
+                case 'W':
+                    s_key_w = false;
+                    update_keyboard_movement_axes();
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 10);
+                    break;
+                case 'S':
+                    s_key_s = false;
+                    update_keyboard_movement_axes();
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 11);
+                    break;
+                case 'A':
+                    s_key_a = false;
+                    update_keyboard_movement_axes();
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 12);
+                    break;
+                case 'D':
+                    s_key_d = false;
+                    update_keyboard_movement_axes();
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 13);
+                    break;
+                case VK_UP:
+                    s_key_up = false;
+                    update_keyboard_movement_axes();
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 10);
+                    break;
+                case VK_DOWN:
+                    s_key_down = false;
+                    update_keyboard_movement_axes();
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 11);
+                    break;
+                case VK_LEFT:
+                    s_key_left = false;
+                    update_keyboard_movement_axes();
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 12);
+                    break;
+                case VK_RIGHT:
+                    s_key_right = false;
+                    update_keyboard_movement_axes();
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 13);
+                    break;
                 case VK_RETURN:
                 case VK_SPACE:
                     lcs::input::InputSystem::instance().queue_joy_button_up(0, 0);
@@ -130,33 +282,25 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 case VK_BACK:
                     lcs::input::InputSystem::instance().queue_joy_button_up(0, 1);
                     break;
-                case VK_UP:
-                case 'W':
-                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 10);
-                    break;
-                case VK_DOWN:
-                case 'S':
-                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 11);
-                    break;
-                case VK_LEFT:
-                case 'A':
-                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 12);
-                    break;
-                case VK_RIGHT:
-                case 'D':
-                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 13);
-                    break;
                 case VK_TAB:
+                case 'M':
                     lcs::input::InputSystem::instance().queue_joy_button_up(0, 7);
                     break;
                 case VK_SHIFT:
-                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 5);
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 0);
                     break;
                 case VK_CONTROL:
                     lcs::input::InputSystem::instance().queue_joy_button_up(0, 2);
                     break;
                 case 'F':
+                case 'E':
                     lcs::input::InputSystem::instance().queue_joy_button_up(0, 3);
+                    break;
+                case 'C':
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 9);
+                    break;
+                case 'R':
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 1);
                     break;
                 default:
                     break;
@@ -330,6 +474,16 @@ void set_window_title(const char* title) {
 #else
     (void)title;
 #endif
+}
+
+bool get_pending_resize(uint32_t& out_w, uint32_t& out_h) {
+    if (g_win.pending_resize) {
+        out_w = g_win.new_width;
+        out_h = g_win.new_height;
+        g_win.pending_resize = false;
+        return true;
+    }
+    return false;
 }
 
 bool is_window_open() {

@@ -123,10 +123,21 @@ GamepadDriver::~GamepadDriver() {
 
 bool GamepadDriver::initialize() {
 #if defined(LCS_HAS_SDL3)
+    // Configure SDL3 hints for full DualSense (PS5), DualShock (PS4/PS3), Switch & Xbox controller support
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "1");
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "1");
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4, "1");
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, "1");
+    SDL_SetHint(SDL_HINT_JOYSTICK_ENHANCED_REPORTS, "1");
+
     if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) {
         std::cerr << "[Gamepad] Failed to init SDL3 gamepad subsystem: " << SDL_GetError() << "\n";
         return false;
     }
+
+    SDL_PumpEvents();
+    SDL_UpdateGamepads();
 
     int count = 0;
     SDL_JoystickID* gamepads = SDL_GetGamepads(&count);
@@ -149,6 +160,9 @@ void GamepadDriver::shutdown() {
 
 void GamepadDriver::poll() {
 #if defined(LCS_HAS_SDL3)
+    SDL_PumpEvents();
+    SDL_UpdateGamepads();
+
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
         if (ev.type == SDL_EVENT_GAMEPAD_ADDED) {
@@ -166,6 +180,15 @@ void GamepadDriver::poll() {
                     SDL_free(gamepads);
                 }
             }
+        }
+    }
+
+    if (!m_impl->connected) {
+        int count = 0;
+        SDL_JoystickID* gamepads = SDL_GetGamepads(&count);
+        if (gamepads && count > 0) {
+            m_impl->open_gamepad(gamepads[0]);
+            SDL_free(gamepads);
         }
     }
 

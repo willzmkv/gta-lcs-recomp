@@ -915,6 +915,8 @@ TranslatedProgramHLSL translate_program_to_hlsl(
         vs << "    gl_main();\n";
         vs << "    PSInput _out;\n";
         vs << "    _out.gl_Position = gl_Position;\n";
+        vs << "    // Remap OpenGL clip space [-w, +w] to Direct3D 12 [0, +w] to prevent near-plane clipping\n";
+        vs << "    _out.gl_Position.z = (_out.gl_Position.z + _out.gl_Position.w) * 0.5f;\n";
         for (const auto& v : varyings) {
             vs << "    _out." << v.name << " = " << v.name << ";\n";
         }

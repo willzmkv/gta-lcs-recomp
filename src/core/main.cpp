@@ -467,9 +467,6 @@ int main(int argc, char* argv[]) {
         }
         lcs::graphics::get_window_size(win_width, win_height);
         native_window = lcs::graphics::get_native_window_handle();
-        lcs::graphics::set_window_resize_callback([](uint32_t new_w, uint32_t new_h) {
-            lcs::graphics::RenderBridge::instance().set_surface_dimensions(new_w, new_h);
-        });
     }
 
     if (!lcs::graphics::RenderBridge::instance().initialize(
@@ -567,6 +564,15 @@ int main(int argc, char* argv[]) {
             }
 
             if (!headless) {
+                // Safely handle window resize between frames when GPU and command lists are idle
+                uint32_t resize_w = 0, resize_h = 0;
+                if (lcs::graphics::get_pending_resize(resize_w, resize_h)) {
+                    bridge.set_surface_dimensions(resize_w, resize_h);
+                    if (fn_surf_changed) {
+                        cpu.call(fn_surf_changed, {env_addr, dummy_clazz, resize_w, resize_h});
+                    }
+                }
+
                 lcs::input::InputSystem::instance().poll_gamepad();
                 lcs::input::InputSystem::instance().dispatch_events(cpu, env_addr, dummy_clazz);
             }
