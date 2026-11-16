@@ -31,6 +31,13 @@ public:
     void wire_to_cpu(DynarmicCore& cpu);
     void set_cpu(DynarmicCore* cpu) { m_cpu = cpu; }
     DynarmicCore* get_cpu() const { return m_cpu; }
+    DynarmicCore* get_active_cpu() const;
+    size_t handler_count() const { return m_handlers.size(); }
+    const HLEFunction& get_handler(size_t index) const { return m_handlers[index]; }
+    std::string get_symbol_name(uint32_t id) const {
+        if (id < m_id_to_name.size()) return m_id_to_name[id];
+        return "<unknown>";
+    }
 
     // Register default stubs (Bionic, libc, pthreads, system, JNI, GLES, OpenAL)
     void register_default_stubs();

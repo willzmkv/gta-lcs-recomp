@@ -71,3 +71,5 @@ CMakeUserPresets.json
 *.user
 Thumbs.db
 .DS_Store
+scratch/
+testwrite

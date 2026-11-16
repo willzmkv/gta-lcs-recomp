@@ -1,6 +1,8 @@
 #include <iostream>
 #include <iomanip>
 #include <filesystem>
+#include <thread>
+#include <atomic>
 #if defined(LCS_PLATFORM_WINDOWS)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -11,6 +13,7 @@
 #include "cpu/dynarmic_core.h"
 #include "cpu/callbacks.h"
 #include "os/jni_bridge.h"
+#include "os/bionic_libc.h"
 
 static lcs::cpu::DynarmicCore* s_active_cpu = nullptr;
 
@@ -19,6 +22,13 @@ static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ep) {
     auto rec = ep->ExceptionRecord;
     std::cerr << "\n[CRASH TRAP] Exception Code: 0x" << std::hex << rec->ExceptionCode
               << " at host address 0x" << rec->ExceptionAddress << std::dec << "\n";
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery(rec->ExceptionAddress, &mbi, sizeof(mbi))) {
+        char mod_name[MAX_PATH] = {0};
+        GetModuleFileNameA(reinterpret_cast<HMODULE>(mbi.AllocationBase), mod_name, sizeof(mod_name));
+        uintptr_t rva = reinterpret_cast<uintptr_t>(rec->ExceptionAddress) - reinterpret_cast<uintptr_t>(mbi.AllocationBase);
+        std::cerr << "  - Fault Module: " << mod_name << " (RVA: 0x" << std::hex << rva << std::dec << ")\n";
+    }
     if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2) {
         std::cerr << "  - Access Type: " << (rec->ExceptionInformation[0] == 0 ? "READ" :
                                             rec->ExceptionInformation[0] == 1 ? "WRITE" : "EXECUTE")
@@ -27,6 +37,10 @@ static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ep) {
     if (s_active_cpu) {
         std::cerr << "  - Guest PC: 0x" << std::hex << s_active_cpu->get_pc()
                   << " (SP: 0x" << s_active_cpu->get_sp() << ")\n";
+        if (s_active_cpu->get_pc() >= 0x7f00200000ULL && s_active_cpu->get_pc() < 0x7f00300000ULL) {
+            uint32_t id = static_cast<uint32_t>((s_active_cpu->get_pc() - 0x7f00200000ULL) / 8);
+            std::cerr << "  - Trampoline: ID " << id << " [" << lcs::cpu::HLEManager::instance().get_symbol_name(id) << "]\n";
+        }
         for (size_t i = 0; i < 31; i += 4) {
             std::cerr << "    X" << i << ": 0x" << s_active_cpu->get_reg(i) << " ";
             if (i + 1 < 31) std::cerr << "X" << (i+1) << ": 0x" << s_active_cpu->get_reg(i+1) << " ";
@@ -34,15 +48,26 @@ static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ep) {
             if (i + 3 < 31) std::cerr << "X" << (i+3) << ": 0x" << s_active_cpu->get_reg(i+3) << " ";
             std::cerr << "\n";
         }
-        std::cerr << std::dec;
+        std::cerr << std::dec << std::flush;
+        std::cout << std::flush;
     }
-    return EXCEPTION_CONTINUE_SEARCH;
+    std::exit(1);
+    return EXCEPTION_EXECUTE_HANDLER;
 }
 #endif
 
 int main(int argc, char* argv[]) {
     (void)argc;
     (void)argv;
+
+#if defined(_WIN32)
+    _set_invalid_parameter_handler([](const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, uintptr_t) {
+        // Suppress fast-fail on invalid CRT arguments (e.g. POSIX mode flags in fopen)
+    });
+    _set_thread_local_invalid_parameter_handler([](const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, uintptr_t) {
+        // Suppress fast-fail on invalid CRT arguments
+    });
+#endif
 
 #if defined(LCS_PLATFORM_WINDOWS)
     AddVectoredExceptionHandler(1, CrashHandler);
@@ -115,6 +140,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "\n[Step 3] Processing ELF relocations...\n";
+    lcs::os::init_bionic_libc();
     lcs::cpu::HLEManager::instance().initialize();
 
     // Symbol resolver cross-referencing between openal, mpg123, and HLE trampoline table
@@ -129,6 +155,9 @@ int main(int argc, char* argv[]) {
             addr = image_mpg123.find_symbol(name);
             if (addr) return addr;
         }
+        uint64_t bionic_data = lcs::os::resolve_bionic_libc_data(name);
+        if (bionic_data) return bionic_data;
+
         return lcs::cpu::HLEManager::instance().resolve(name);
     };
 
@@ -269,15 +298,14 @@ int main(int argc, char* argv[]) {
     uint64_t fn_set_asset_packs = image_game.find_symbol("Java_com_rockstargames_gtalcs_GTAJNIlib_setAssetPacksInfo");
     if (fn_set_asset_packs) {
         auto& jni = lcs::os::JNIBridge::instance();
-        uint64_t name_main = jni.create_string_utf("main");
-        uint64_t name_music = jni.create_string_utf("music");
-        uint64_t path_main = jni.create_string_utf("gtalcs/gamefiles/assets/data_main.wad");
-        uint64_t path_music = jni.create_string_utf("gtalcs/gamefiles/assets/data_music.wad");
+        uint64_t name_main = jni.create_string_utf("data_main");
+        uint64_t name_music = jni.create_string_utf("data_music");
+        uint64_t path_base = jni.create_string_utf("gtalcs/gamefiles");
 
         uint64_t arr_names = jni.create_object_array({name_main, name_music});
-        uint64_t arr_paths = jni.create_object_array({path_main, path_music});
+        uint64_t arr_paths = jni.create_object_array({path_base, path_base});
 
-        std::cout << "  [1.5] Invoking setAssetPacksInfo([\"main\", \"music\"])..." << std::flush;
+        std::cout << "  [1.5] Invoking setAssetPacksInfo([\"data_main\", \"data_music\"])..." << std::flush;
         cpu.call(fn_set_asset_packs, {env_addr, dummy_clazz, arr_names, arr_paths});
         std::cout << " OK\n";
     }
@@ -366,5 +394,10 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "\n[Result] Android lifecycle bootstrap sequence completed successfully.\n";
+#if defined(_WIN32)
+    ExitProcess(0);
+#else
+    _exit(0);
+#endif
     return 0;
 }

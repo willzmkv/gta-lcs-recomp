@@ -20,6 +20,22 @@ public:
 
     bool initialize();
 
+    // Initialize a secondary core for a guest thread. The stack and TLS block are
+    // allocated at any free host address (guest and host share one address space)
+    // and released when the core is destroyed.
+    bool initialize_thread(size_t stack_size = 4ULL * 1024 * 1024);
+
+    // Core currently executing guest code on the calling host thread (nullptr if none).
+    static DynarmicCore* current();
+
+    // Handler used for any SVC number not registered on the executing core. This lets
+    // every guest thread core dispatch the shared HLE trampoline table.
+    static void set_fallback_svc_handler(SVCHandler handler);
+
+    // Terminate the active top-level call() (used by pthread_exit). The value returned
+    // by the current SVC handler becomes the call result.
+    void request_exit();
+
     // Register inspection & modification
     void set_reg(size_t index, uint64_t value);
     uint64_t get_reg(size_t index) const;
@@ -29,6 +45,12 @@ public:
 
     void set_sp(uint64_t sp);
     uint64_t get_sp() const;
+
+    void set_fp_float(size_t index, float value);
+    float get_fp_float(size_t index) const;
+
+    void set_fp_double(size_t index, double value);
+    double get_fp_double(size_t index) const;
 
     void set_tpidr_el0(uint64_t tls_addr);
     uint64_t get_tpidr_el0() const;
