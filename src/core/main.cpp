@@ -19,6 +19,7 @@
 #include "os/bionic_libc.h"
 #include "graphics/window.h"
 #include "graphics/render_bridge.h"
+#include "input/input_system.h"
 
 static lcs::cpu::DynarmicCore* s_active_cpu = nullptr;
 
@@ -467,6 +468,28 @@ int main(int argc, char* argv[]) {
     uint64_t fn_game_loaded = image_game.find_symbol("Java_com_rockstargames_gtalcs_RockstarJNIlib_GameLoaded");
     uint64_t fn_start_before_load = image_game.find_symbol("Java_com_rockstargames_gtalcs_RockstarJNIlib_StartGameBeforeLoad");
     uint64_t fn_start_game = image_game.find_symbol("Java_com_rockstargames_gtalcs_RockstarJNIlib_StartGame");
+    uint64_t fn_touch_start = image_game.find_symbol("Java_com_rockstargames_gtalcs_GTAJNIlib_onTouchStart");
+    uint64_t fn_touch_move = image_game.find_symbol("Java_com_rockstargames_gtalcs_GTAJNIlib_onTouchMove");
+    uint64_t fn_touch_end = image_game.find_symbol("Java_com_rockstargames_gtalcs_GTAJNIlib_onTouchEnd");
+    uint64_t fn_joy_down = image_game.find_symbol("Java_com_rockstargames_gtalcs_GTAJNIlib_onJoyButtonDown");
+    uint64_t fn_joy_up = image_game.find_symbol("Java_com_rockstargames_gtalcs_GTAJNIlib_onJoyButtonUp");
+    uint64_t fn_joy_axis = image_game.find_symbol("Java_com_rockstargames_gtalcs_GTAJNIlib_setJoyAxis");
+    uint64_t fn_no_joysticks = image_game.find_symbol("Java_com_rockstargames_gtalcs_GTAJNIlib_setNoJoysticks");
+    uint64_t fn_back_button = image_game.find_symbol("Java_com_rockstargames_gtalcs_GTAJNIlib_onBackButtonPressed");
+    uint64_t fn_is_main_menu = image_game.find_symbol("Java_com_rockstargames_gtalcs_GTAJNIlib_isOnMainMenuScreen");
+
+    if (!headless) {
+        lcs::input::InputSystem::instance().init(
+            fn_touch_start,
+            fn_touch_move,
+            fn_touch_end,
+            fn_joy_down,
+            fn_joy_up,
+            fn_joy_axis,
+            fn_no_joysticks,
+            fn_back_button
+        );
+    }
 
     if (fn_draw_frame) {
         std::cout << "  [11] Entering main frame loop"
@@ -500,6 +523,11 @@ int main(int argc, char* argv[]) {
                 break;
             }
 
+            if (!headless) {
+                lcs::input::InputSystem::instance().poll_gamepad();
+                lcs::input::InputSystem::instance().dispatch_events(cpu, env_addr, dummy_clazz);
+            }
+
             auto now = std::chrono::steady_clock::now();
             float dt = std::chrono::duration<float>(now - last_time).count();
             last_time = now;
@@ -523,9 +551,11 @@ int main(int argc, char* argv[]) {
             rendered_frames++;
             uint64_t frame_draws = bridge.get_draw_call_count() - pre_draws;
             if (rendered_frames <= 15 || rendered_frames % 60 == 0) {
+                bool in_menu = fn_is_main_menu ? (cpu.call(fn_is_main_menu, {env_addr, dummy_clazz}) != 0) : false;
                 std::cout << "  - Frame " << rendered_frames
                           << " (dt=" << dt << "s, frame_draws=" << frame_draws
                           << ", guest_swap=" << (guest_swapped ? "yes" : "no")
+                          << ", main_menu=" << (in_menu ? "yes" : "no")
                           << ", total_draws=" << bridge.get_draw_call_count()
                           << ", shaders=" << bridge.get_shader_count()
                           << ", programs=" << bridge.get_program_count()

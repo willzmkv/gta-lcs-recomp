@@ -1,4 +1,5 @@
 #include "window.h"
+#include "input/input_system.h"
 
 #include <iostream>
 
@@ -43,6 +44,122 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                         g_win.on_resize(new_w, new_h);
                     }
                 }
+            }
+            return 0;
+        }
+        case WM_LBUTTONDOWN: {
+            int x = static_cast<short>(LOWORD(lparam));
+            int y = static_cast<short>(HIWORD(lparam));
+            float nx = (g_win.width > 0) ? static_cast<float>(x) / static_cast<float>(g_win.width) : 0.0f;
+            float ny = (g_win.height > 0) ? static_cast<float>(y) / static_cast<float>(g_win.height) : 0.0f;
+            SetCapture(hwnd);
+            lcs::input::InputSystem::instance().queue_touch_down(0, nx, ny);
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            if (wparam & MK_LBUTTON) {
+                int x = static_cast<short>(LOWORD(lparam));
+                int y = static_cast<short>(HIWORD(lparam));
+                float nx = (g_win.width > 0) ? static_cast<float>(x) / static_cast<float>(g_win.width) : 0.0f;
+                float ny = (g_win.height > 0) ? static_cast<float>(y) / static_cast<float>(g_win.height) : 0.0f;
+                lcs::input::InputSystem::instance().queue_touch_move(0, nx, ny);
+            }
+            return 0;
+        }
+        case WM_LBUTTONUP: {
+            int x = static_cast<short>(LOWORD(lparam));
+            int y = static_cast<short>(HIWORD(lparam));
+            float nx = (g_win.width > 0) ? static_cast<float>(x) / static_cast<float>(g_win.width) : 0.0f;
+            float ny = (g_win.height > 0) ? static_cast<float>(y) / static_cast<float>(g_win.height) : 0.0f;
+            ReleaseCapture();
+            lcs::input::InputSystem::instance().queue_touch_up(0, nx, ny);
+            return 0;
+        }
+        case WM_KEYDOWN: {
+            if (lparam & (1 << 30)) return 0; // Ignore autorepeat
+            switch (wparam) {
+                case VK_RETURN:
+                case VK_SPACE:
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 0); // Cross / A
+                    break;
+                case VK_ESCAPE:
+                    lcs::input::InputSystem::instance().queue_back_button();
+                    break;
+                case VK_BACK:
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 1); // Circle / B
+                    break;
+                case VK_UP:
+                case 'W':
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 10); // Up
+                    break;
+                case VK_DOWN:
+                case 'S':
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 11); // Down
+                    break;
+                case VK_LEFT:
+                case 'A':
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 12); // Left
+                    break;
+                case VK_RIGHT:
+                case 'D':
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 13); // Right
+                    break;
+                case VK_TAB:
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 7); // Start
+                    break;
+                case VK_SHIFT:
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 5); // R1
+                    break;
+                case VK_CONTROL:
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 2); // Square
+                    break;
+                case 'F':
+                    lcs::input::InputSystem::instance().queue_joy_button_down(0, 3); // Triangle
+                    break;
+                default:
+                    break;
+            }
+            return 0;
+        }
+        case WM_KEYUP: {
+            switch (wparam) {
+                case VK_RETURN:
+                case VK_SPACE:
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 0);
+                    break;
+                case VK_BACK:
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 1);
+                    break;
+                case VK_UP:
+                case 'W':
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 10);
+                    break;
+                case VK_DOWN:
+                case 'S':
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 11);
+                    break;
+                case VK_LEFT:
+                case 'A':
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 12);
+                    break;
+                case VK_RIGHT:
+                case 'D':
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 13);
+                    break;
+                case VK_TAB:
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 7);
+                    break;
+                case VK_SHIFT:
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 5);
+                    break;
+                case VK_CONTROL:
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 2);
+                    break;
+                case 'F':
+                    lcs::input::InputSystem::instance().queue_joy_button_up(0, 3);
+                    break;
+                default:
+                    break;
             }
             return 0;
         }

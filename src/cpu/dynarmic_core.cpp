@@ -7,6 +7,7 @@
 #include <array>
 #include <mutex>
 #include <vector>
+#include <algorithm>
 
 #if defined(LCS_PLATFORM_WINDOWS)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -129,6 +130,7 @@ private:
 
 struct DynarmicCore::Impl {
     CoreCallbacks callbacks{this};
+    Dynarmic::ExclusiveMonitor monitor{1};
     Dynarmic::A64::UserConfig config;
     std::unique_ptr<Dynarmic::A64::Jit> jit;
     std::unordered_map<uint32_t, SVCHandler> svc_handlers;
@@ -143,14 +145,9 @@ struct DynarmicCore::Impl {
     uint64_t stack_top = GUEST_STACK_TOP;
     size_t stack_size = 0;
     bool owns_dynamic_mem = false;
-    int processor_id = -1;
 
     ~Impl() {
         jit.reset();
-        if (processor_id >= 0) {
-            shared_monitor().ClearProcessor(static_cast<size_t>(processor_id));
-            release_processor_id(processor_id);
-        }
         if (owns_dynamic_mem) {
 #if defined(LCS_PLATFORM_WINDOWS)
             if (stack_mem) VirtualFree(stack_mem, 0, MEM_RELEASE);
@@ -160,44 +157,6 @@ struct DynarmicCore::Impl {
             if (tls_mem) munmap(tls_mem, 0x10000);
 #endif
         }
-    }
-
-    // One exclusive monitor shared by every core so LDXR/STXR pairs stay coherent
-    // across guest threads. Each core owns a distinct processor slot.
-    // Dynarmic's internal static_vector has capacity MAX_NUM_CPU_CORES = 6.
-    static constexpr size_t MAX_PROCESSORS = 6;
-
-    static Dynarmic::ExclusiveMonitor& shared_monitor() {
-        static Dynarmic::ExclusiveMonitor s_monitor(MAX_PROCESSORS);
-        return s_monitor;
-    }
-
-    static std::mutex& processor_mutex() {
-        static std::mutex s_mutex;
-        return s_mutex;
-    }
-
-    static std::vector<bool>& processor_slots() {
-        static std::vector<bool> s_slots(MAX_PROCESSORS, false);
-        return s_slots;
-    }
-
-    static int acquire_processor_id() {
-        std::lock_guard<std::mutex> lock(processor_mutex());
-        auto& slots = processor_slots();
-        for (size_t i = 0; i < slots.size(); i++) {
-            if (!slots[i]) {
-                slots[i] = true;
-                return static_cast<int>(i);
-            }
-        }
-        return -1;
-    }
-
-    static void release_processor_id(int id) {
-        std::lock_guard<std::mutex> lock(processor_mutex());
-        auto& slots = processor_slots();
-        if (id >= 0 && static_cast<size_t>(id) < slots.size()) slots[static_cast<size_t>(id)] = false;
     }
 
     static SVCHandler& fallback_handler() {
@@ -346,14 +305,8 @@ void DynarmicCore::request_exit() {
 }
 
 static bool finish_jit_setup(DynarmicCore::Impl& impl) {
-    impl.processor_id = DynarmicCore::Impl::acquire_processor_id();
-    if (impl.processor_id < 0) {
-        std::cerr << "[CPU] No free exclusive monitor processor slot (max "
-                  << DynarmicCore::Impl::MAX_PROCESSORS << " guest threads).\n";
-        return false;
-    }
-    impl.config.global_monitor = &DynarmicCore::Impl::shared_monitor();
-    impl.config.processor_id = static_cast<std::uint8_t>(impl.processor_id);
+    impl.config.global_monitor = &impl.monitor;
+    impl.config.processor_id = 0;
     impl.config.callbacks = &impl.callbacks;
     impl.config.tpidr_el0 = &impl.tpidr_el0;
     impl.config.tpidrro_el0 = &impl.tpidrro_el0;
