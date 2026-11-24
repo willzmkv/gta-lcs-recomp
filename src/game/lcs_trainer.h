@@ -171,6 +171,8 @@ public:
     // Teleport actions
     bool save_position();
     bool return_to_saved_position();
+    // Turns the player ped to `heading_deg` (GTA convention) and cuts the camera behind it.
+    void set_player_heading(float heading_deg);
     bool teleport_to(float x, float y, float z, const char* label = nullptr);
     bool teleport_beside_nearest_vehicle(int preferred_model = -1);
     bool has_saved_position() const { return m_has_saved_pos; }
@@ -290,6 +292,8 @@ private:
     uint64_t m_fn_vehicle_cheat = 0;
     uint64_t m_fn_tank_cheat = 0;
     uint64_t m_fn_get_model_info = 0;
+    uint64_t m_fn_restore_jump_cut = 0;
+    uint64_t m_camera_addr = 0;
 
     // Unlimited ammo: CWeapon::Fire's two ammo stores (clip, total) branch to stubs that skip
     // the store when the shooter is the ped in this literal (0 = feature off).

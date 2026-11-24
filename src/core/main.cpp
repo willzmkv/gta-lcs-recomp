@@ -2837,6 +2837,46 @@ int main(int argc, char* argv[]) {
                                     s_vstage = 102; s_vframes = 0;
                                 }
                             }
+                        } else if (s_vstage == 102 && std::getenv("LCS_DIAG_SHOTS")) {
+                            s_vstage = 400; s_vframes = 0;
+                        } else if (s_vstage >= 400 && s_vstage < 500) {
+                            // LCS_DIAG_SHOTS="x,y,z,heading;...": teleport on foot, face the heading, wait for
+                            // streaming, capture scratch/shot_N.bmp (coordinates as copied with Ctrl+F3)
+                            static std::vector<std::array<float, 4>> s_shots;
+                            if (s_shots.empty()) {
+                                std::string spec = std::getenv("LCS_DIAG_SHOTS");
+                                for (size_t p = 0; p < spec.size();) {
+                                    size_t e = spec.find(';', p);
+                                    if (e == std::string::npos) e = spec.size();
+                                    std::array<float, 4> v{};
+                                    if (std::sscanf(spec.substr(p, e - p).c_str(), "%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3]) == 4) {
+                                        s_shots.push_back(v);
+                                    }
+                                    p = e + 1;
+                                }
+                            }
+                            const int shot = s_vstage - 400;
+                            if (shot >= static_cast<int>(s_shots.size())) {
+                                std::cout << "  [VerifyDone] Shots complete.\n" << std::flush;
+                                break;
+                            }
+                            const auto& sv = s_shots[static_cast<size_t>(shot)];
+                            if (s_vframes == 1) {
+                                tr.set_time_of_day(12);
+                                tr.set_weather(0);
+                                tr.teleport_to(sv[0], sv[1], sv[2], "shot");
+                                lcs::game::LcsWorldHd::instance().set_radius(lcs::settings::get().world_hd_radius);
+                            }
+                            if (s_vframes <= 240) {
+                                // Face the heading every frame (GTA: 0 = north, counter-clockwise)
+                                tr.set_player_heading(sv[3]);
+                            }
+                            if (s_vframes == 240) {
+                                char pbuf[64];
+                                std::snprintf(pbuf, sizeof(pbuf), "scratch/shot_%d.bmp", shot);
+                                cap_frame(pbuf);
+                            }
+                            if (s_vframes == 243) { ++s_vstage; s_vframes = 0; }
                         } else if (s_vstage == 102 && std::getenv("LCS_DIAG_POPIN")) {
                             s_vstage = 300; s_vframes = 0;
                         } else if (s_vstage >= 300 && s_vstage < 400) {

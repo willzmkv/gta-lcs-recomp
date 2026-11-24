@@ -2082,10 +2082,11 @@ void LcsWorldHd::rebuild_combined_chunk(uint64_t ws_ptr) {
     lq_replaced_memo.reserve(512);
     int lq_replaced_count = 0;
     // `p` is an instance record in a list whose cell centre is (list_x, list_y).
-    // LCS_WHD_LQ_RULE=0 draws the plain union again (A/B comparisons).
+    // LCS_WHD_LQ_RULE=1 enables the LQ replacement rule. Off by default: it removed whole
+    // buildings at some spots (Red Light District 910,-442 / 927,-342, shots 2026-11-24).
     static const bool s_lq_rule = [] {
         const char* e = std::getenv("LCS_WHD_LQ_RULE");
-        return !(e && e[0] == '0');
+        return e && e[0] == '1';
     }();
     auto lq_replaced = [&](size_t bucket, uint64_t p, float list_x, float list_y) -> bool {
         const uint16_t raw_id = *reinterpret_cast<const uint16_t*>(p);

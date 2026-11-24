@@ -464,6 +464,8 @@ void LCSTrainer::attach(const lcs::cpu::ElfImage& image_game, lcs::cpu::Dynarmic
     m_fn_vehicle_cheat = image_game.find_symbol("_Z12VehicleCheati");
     m_fn_tank_cheat    = image_game.find_symbol("_Z9TankCheatv");
     m_fn_get_model_info = image_game.find_symbol("_ZN10CModelInfo12GetModelInfoEPKcPi");
+    m_fn_restore_jump_cut = image_game.find_symbol("_ZN7CCamera18RestoreWithJumpCutEb");
+    m_camera_addr = image_game.find_symbol("TheCamera");
     install_unlimited_ammo_patch(image_game, cpu);
     m_fn_fix_car       = image_game.find_symbol("_ZN11CAutomobile3FixEv");
     m_fn_force_weather = image_game.find_symbol("_ZN8CWeather15ForceWeatherNowEs");
@@ -1293,6 +1295,40 @@ bool LCSTrainer::return_to_saved_position() {
         return false;
     }
     return teleport_to(m_saved_pos[0], m_saved_pos[1], m_saved_pos[2], ui::loc::tx("Posição Salva"));
+}
+
+void LCSTrainer::set_player_heading(float heading_deg) {
+    if (!m_attached || !m_cpu) return;
+    const float rad = heading_deg * 0.01745329252f;
+    enqueue_cpu_action([this, rad]() {
+        const uint64_t ped = get_player_ped();
+        if (!ped) return;
+        // Same matrix CPlaceable::SetHeading builds (it takes the angle in s0, which
+        // call_guest cannot pass); then cut the camera behind the player.
+        float* m = reinterpret_cast<float*>(ped + kEntityMatrixOffset);
+        // CPed rebuilds its matrix from its rotation angles (current, destination) every frame.
+        // Find them once: floats in the ped equal to the matrix's present heading.
+        static std::vector<uint32_t> s_rot_offsets;
+        if (s_rot_offsets.empty()) {
+            const float cur = std::atan2(-m[4], m[5]);
+            for (uint32_t off = 0x80; off + 4 <= 0xdc0; off += 4) {
+                const float v = *reinterpret_cast<const float*>(ped + off);
+                if (std::isfinite(v) && (std::fabs(v - cur) < 1e-3f || std::fabs(v - cur - 6.2831853f) < 1e-3f ||
+                                         std::fabs(v - cur + 6.2831853f) < 1e-3f)) {
+                    s_rot_offsets.push_back(off);
+                }
+            }
+            std::cout << "[LCSTrainer] Ped rotation candidates:";
+            for (uint32_t o : s_rot_offsets) std::cout << " 0x" << std::hex << o << std::dec;
+            std::cout << "\n";
+        }
+        for (uint32_t o : s_rot_offsets) *reinterpret_cast<float*>(ped + o) = rad;
+        const float c = std::cos(rad), s = std::sin(rad);
+        m[0] = c;  m[1] = s;  m[2] = 0.0f;   // right
+        m[4] = -s; m[5] = c;  m[6] = 0.0f;   // forward
+        m[8] = 0.0f; m[9] = 0.0f; m[10] = 1.0f;
+        if (m_fn_restore_jump_cut && m_camera_addr) call_guest(m_fn_restore_jump_cut, {m_camera_addr, 1});
+    });
 }
 
 bool LCSTrainer::teleport_to(float x, float y, float z, const char* label) {
