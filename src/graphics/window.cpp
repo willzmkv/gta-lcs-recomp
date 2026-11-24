@@ -156,8 +156,18 @@ static void normalize_client_menu_pos(int x, int y, float& nx, float& ny) {
     ny = (rh > 0.0f) ? std::clamp((static_cast<float>(y) - ry) / rh, 0.0f, 1.0f) : 0.0f;
 }
 
+// LCS_HIDDEN_WINDOW=1: create the window and swapchain but never show them (automated
+// verification runs in the background without taking over the user's screen).
+static bool hidden_window_mode() {
+    static const bool s_hidden = [] {
+        const char* e = std::getenv("LCS_HIDDEN_WINDOW");
+        return e && e[0] == '1';
+    }();
+    return s_hidden;
+}
+
 static bool enter_win32_borderless_fullscreen() {
-    if (!g_win.hwnd) return false;
+    if (!g_win.hwnd || hidden_window_mode()) return false;
     g_win.saved_style = static_cast<DWORD>(GetWindowLongPtrA(g_win.hwnd, GWL_STYLE));
     g_win.saved_ex_style = static_cast<DWORD>(GetWindowLongPtrA(g_win.hwnd, GWL_EXSTYLE));
     g_win.saved_placement = WINDOWPLACEMENT{sizeof(WINDOWPLACEMENT)};
@@ -631,7 +641,9 @@ bool create_game_window(int width, int height, const char* title, bool fullscree
     g_win.open = true;
     g_win.owner_thread_id = std::this_thread::get_id();
     g_win.fullscreen = false;
-    if (fullscreen && enter_win32_borderless_fullscreen()) {
+    if (hidden_window_mode()) {
+        std::cout << "[Window] LCS_HIDDEN_WINDOW=1: window stays hidden.\n";
+    } else if (fullscreen && enter_win32_borderless_fullscreen()) {
         g_win.fullscreen = true;
     } else {
         ShowWindow(g_win.hwnd, SW_SHOW);
@@ -645,9 +657,11 @@ bool create_game_window(int width, int height, const char* title, bool fullscree
     g_win.new_height = g_win.height;
     g_win.pending_resize = false;
 
-    UpdateWindow(g_win.hwnd);
-    SetForegroundWindow(g_win.hwnd);
-    SetFocus(g_win.hwnd);
+    if (!hidden_window_mode()) {
+        UpdateWindow(g_win.hwnd);
+        SetForegroundWindow(g_win.hwnd);
+        SetFocus(g_win.hwnd);
+    }
 
     RAWINPUTDEVICE rid{};
     rid.usUsagePage = 0x01; // Generic desktop controls
@@ -897,7 +911,8 @@ void set_window_size(uint32_t width, uint32_t height) {
     } else {
         SetWindowPos(
             g_win.hwnd, nullptr, pos_x, pos_y, win_w, win_h,
-            SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW
+            SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED |
+                (hidden_window_mode() ? 0u : SWP_SHOWWINDOW)
         );
         RECT client{};
         if (GetClientRect(g_win.hwnd, &client)) {
@@ -945,7 +960,7 @@ bool is_window_open() {
 }
 
 void set_fullscreen(bool fullscreen) {
-    if (g_win.fullscreen == fullscreen) {
+    if (g_win.fullscreen == fullscreen || hidden_window_mode()) {
         return;
     }
 #if defined(LCS_PLATFORM_WINDOWS)
