@@ -1767,14 +1767,23 @@ void LcsDistance::sync_spawn_distances() {
     const bool extended = pop >= 50;
     // GenerateOneRandomCar's in-view spawn distance = speed factor (0.65..1.33) x gen x base;
     // GenerateCarCreationCoors only finds road nodes inside the search radius.
-    const float car_base = env_float("LCS_CAR_INVIEW_BASE", 185.0f);
-    const float car_radius = env_float("LCS_CAR_NODE_RADIUS", 380.0f);
+    // GenerateOneRandomCar keeps a car spawned in view only inside [130, 190] x f from the player
+    // (f = speed factor x gen; 0x3b3af0 / 0x3b3ac0) and >= 105 x f from the camera (0x3b3b08):
+    // the in-view base (140, 185 before) must move with that window or every car is discarded.
+    const float car_base = env_float("LCS_CAR_INVIEW_BASE", extended ? 185.0f + 75.0f * t : 185.0f);
+    const float car_radius = env_float("LCS_CAR_NODE_RADIUS", extended ? 380.0f + 120.0f * t : 380.0f);
     const float ped_min = env_float("LCS_PED_INVIEW_MIN", extended ? 110.0f + 50.0f * t : 0.0f);
     if (std::fabs(car_base - m_applied_car_inview) >= 1.0f) {
         const uint32_t insn = mov_w8_float(car_base);
         patch_mem(*m_cpu, m_load_bias + 0x3b2a0cULL, &insn, sizeof(uint32_t));
         patch_mem(*m_cpu, m_load_bias + 0x3b2aa8ULL, &insn, sizeof(uint32_t));
         patch_mem(*m_cpu, m_load_bias + 0x3b2af0ULL, &insn, sizeof(uint32_t));
+        const uint32_t keep_max = mov_w8_float(car_base * (190.0f / 185.0f));
+        const uint32_t keep_min = mov_w8_float(car_base * (130.0f / 185.0f));
+        const uint32_t cam_min = mov_w8_float(car_base * (105.0f / 185.0f));
+        patch_mem(*m_cpu, m_load_bias + 0x3b3ac0ULL, &keep_max, sizeof(uint32_t));
+        patch_mem(*m_cpu, m_load_bias + 0x3b3af0ULL, &keep_min, sizeof(uint32_t));
+        patch_mem(*m_cpu, m_load_bias + 0x3b3b08ULL, &cam_min, sizeof(uint32_t));
         m_applied_car_inview = car_base;
     }
     if (std::fabs(car_radius - m_applied_car_node_radius) >= 1.0f) {
