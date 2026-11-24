@@ -463,6 +463,8 @@ void LCSTrainer::attach(const lcs::cpu::ElfImage& image_game, lcs::cpu::Dynarmic
     m_fn_set_wanted    = image_game.find_symbol("_ZN10CPlayerPed14SetWantedLevelEi");
     m_fn_vehicle_cheat = image_game.find_symbol("_Z12VehicleCheati");
     m_fn_tank_cheat    = image_game.find_symbol("_Z9TankCheatv");
+    m_fn_get_model_info = image_game.find_symbol("_ZN10CModelInfo12GetModelInfoEPKcPi");
+    install_unlimited_ammo_patch(image_game, cpu);
     m_fn_fix_car       = image_game.find_symbol("_ZN11CAutomobile3FixEv");
     m_fn_force_weather = image_game.find_symbol("_ZN8CWeather15ForceWeatherNowEs");
     m_fn_text_get           = image_game.find_symbol("_ZN5CText3GetEPKc");
@@ -810,13 +812,19 @@ void LCSTrainer::tick(float dt_sec) {
                 });
             }
         }
-        if (unlimited_ammo || no_reload) {
+        // Unlimited ammo: CWeapon::Fire skips both ammo stores for this ped (neither the clip
+        // nor the total ever drops, so no reload either). Other peds are unaffected.
+        if (m_ammo_player_literal) {
+            *m_ammo_player_literal = unlimited_ammo ? ped : 0;
+        }
+        const bool ammo_fallback = unlimited_ammo && !m_ammo_player_literal;
+        if (ammo_fallback || no_reload) {
             for (int slot = 0; slot < 10; ++slot) {
                 const uint64_t wptr = ped + kPedWeaponsOffset + static_cast<uint64_t>(slot) * kPedWeaponStride;
                 const uint32_t wtype = *reinterpret_cast<const uint32_t*>(wptr + 0x00);
                 if (wtype >= 12 && wtype <= 35) {
                     if (no_reload) *reinterpret_cast<uint32_t*>(wptr + 0x08) = 99;
-                    if (unlimited_ammo) *reinterpret_cast<uint32_t*>(wptr + 0x0c) = 9999;
+                    if (ammo_fallback) *reinterpret_cast<uint32_t*>(wptr + 0x0c) = 9999;
                 }
             }
         }
@@ -1058,12 +1066,12 @@ void LCSTrainer::give_full_loadout() {
     }
 }
 
-void LCSTrainer::spawn_vehicle(int model_id) {
-    if (!m_attached || !m_cpu) {
+void LCSTrainer::spawn_vehicle(const char* model_name, int fallback_id) {
+    if (!m_attached || !m_cpu || !model_name) {
         push_notice(ui::loc::tx("Spawn de veículo indisponível"), 1);
         return;
     }
-    if (model_id == 162 && m_fn_tank_cheat) {
+    if (std::strcmp(model_name, "rhino") == 0 && m_fn_tank_cheat) {
         enqueue_cpu_action([this]() {
             if (!get_player_ped()) return;
             call_guest(m_fn_tank_cheat, {});
@@ -1071,13 +1079,92 @@ void LCSTrainer::spawn_vehicle(int model_id) {
         push_notice(ui::loc::tx("Tanque Rhino spawnado!"), 2);
         return;
     }
-    if (m_fn_vehicle_cheat) {
-        enqueue_cpu_action([this, model_id]() {
-            if (!get_player_ped()) return;
-            call_guest(m_fn_vehicle_cheat, {static_cast<uint64_t>(model_id)});
-        });
-        push_notice(std::string(ui::loc::tx("Veículo spawnado")) + " (#" + std::to_string(model_id) + ")", 2);
+    if (!m_fn_vehicle_cheat) return;
+    // The menus pass string literals, so the pointer stays valid until the action runs.
+    enqueue_cpu_action([this, model_name, fallback_id]() {
+        if (!get_player_ped()) return;
+        // Guest and host share one address space: the host stack slot is a valid guest pointer.
+        int32_t model_id = -1;
+        uint64_t info = 0;
+        if (m_fn_get_model_info) {
+            info = call_guest(m_fn_get_model_info, {reinterpret_cast<uint64_t>(model_name),
+                                                    reinterpret_cast<uint64_t>(&model_id)});
+        }
+        if (!info || model_id <= 0) {
+            std::cout << "[LCSTrainer] Model '" << model_name << "' not found, using id " << fallback_id << "\n";
+            model_id = fallback_id;
+        }
+        call_guest(m_fn_vehicle_cheat, {static_cast<uint64_t>(model_id)});
+    });
+    push_notice(std::string(ui::loc::tx("Veículo spawnado")), 2);
+}
+
+void LCSTrainer::install_unlimited_ammo_patch(const lcs::cpu::ElfImage& image_game, lcs::cpu::DynarmicCore& cpu) {
+#if defined(_WIN32)
+    if (m_ammo_player_literal) return;
+    const uint64_t fire = image_game.find_symbol("_ZN7CWeapon4FireEP7CEntityP7CVector");
+    if (!fire) return;
+    // In CWeapon::Fire (x19 = this CWeapon, x20 = shooter entity):
+    //   +0x5d8: str w8, [x19, #8]    ; m_nAmmoInClip -= 1
+    //   +0x628: str w8, [x19, #0xc]  ; m_nAmmoTotal -= 1
+    constexpr uint64_t kClipStoreOff = 0x5d8, kTotalStoreOff = 0x628;
+    constexpr uint32_t kStrClip = 0xB9000A68u, kStrTotal = 0xB9000E68u;
+    auto* clip_site = reinterpret_cast<uint32_t*>(fire + kClipStoreOff);
+    auto* total_site = reinterpret_cast<uint32_t*>(fire + kTotalStoreOff);
+    if (*clip_site != kStrClip || *total_site != kStrTotal) {
+        std::cerr << "[LCSTrainer] CWeapon::Fire layout differs; unlimited ammo uses the per-frame fallback.\n";
+        return;
     }
+
+    // The stubs must sit within B's +-128 MB of libGame's code: try pages after the image.
+    uint8_t* page = nullptr;
+    for (uint64_t probe = (fire + 0x1000000ULL) & ~0xFFFFULL; probe < fire + 0x7000000ULL && !page; probe += 0x10000ULL) {
+        page = static_cast<uint8_t*>(VirtualAlloc(reinterpret_cast<void*>(probe), 0x1000,
+                                                  MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+    }
+    if (!page) {
+        std::cerr << "[LCSTrainer] No stub page near libGame; unlimited ammo uses the per-frame fallback.\n";
+        return;
+    }
+
+    auto b_to = [](uint64_t from, uint64_t to) -> uint32_t {
+        return 0x14000000u | (static_cast<uint32_t>((static_cast<int64_t>(to) - static_cast<int64_t>(from)) >> 2) & 0x03FFFFFFu);
+    };
+    auto ldr_lit = [](uint64_t from, uint64_t lit, uint32_t rt) -> uint32_t {
+        return 0x58000000u | ((static_cast<uint32_t>((static_cast<int64_t>(lit) - static_cast<int64_t>(from)) >> 2) & 0x7FFFFu) << 5) | rt;
+    };
+    const uint64_t base = reinterpret_cast<uint64_t>(page);
+    const uint64_t lit = base;  // uint64 player ped (0 = off)
+    auto emit_stub = [&](uint64_t at, uint32_t store, uint64_t resume) {
+        uint32_t* c = reinterpret_cast<uint32_t*>(at);
+        c[0] = ldr_lit(at, lit, 9);      // ldr x9, player
+        c[1] = 0xEB09029Fu;              // cmp x20, x9
+        c[2] = 0x54000040u;              // b.eq +8 (skip the store)
+        c[3] = store;                    // original str
+        c[4] = b_to(at + 16, resume);    // b back
+    };
+    *reinterpret_cast<uint64_t*>(lit) = 0;
+    const uint64_t clip_stub = base + 0x10, total_stub = base + 0x30;
+    emit_stub(clip_stub, kStrClip, fire + kClipStoreOff + 4);
+    emit_stub(total_stub, kStrTotal, fire + kTotalStoreOff + 4);
+    cpu.invalidate_cache(base, 0x40);
+
+    const uint32_t clip_jump = b_to(fire + kClipStoreOff, clip_stub);
+    const uint32_t total_jump = b_to(fire + kTotalStoreOff, total_stub);
+    DWORD old_prot = 0;
+    VirtualProtect(clip_site, 0x60, PAGE_EXECUTE_READWRITE, &old_prot);
+    *clip_site = clip_jump;
+    *total_site = total_jump;
+    VirtualProtect(clip_site, 0x60, old_prot, &old_prot);
+    cpu.invalidate_cache(fire + kClipStoreOff, 4);
+    cpu.invalidate_cache(fire + kTotalStoreOff, 4);
+
+    m_ammo_player_literal = reinterpret_cast<volatile uint64_t*>(lit);
+    std::cout << "[LCSTrainer] Unlimited ammo hooks installed in CWeapon::Fire.\n";
+#else
+    (void)image_game;
+    (void)cpu;
+#endif
 }
 
 void LCSTrainer::repair_vehicle() {

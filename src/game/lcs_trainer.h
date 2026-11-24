@@ -138,7 +138,9 @@ public:
     void give_full_loadout();
 
     // Vehicle actions
-    void spawn_vehicle(int model_id);
+    // `model_name` is the DEFAULT.IDE name (e.g. "infernus"); the model id is resolved through
+    // CModelInfo::GetModelInfo, `fallback_id` is used only if that lookup fails.
+    void spawn_vehicle(const char* model_name, int fallback_id);
     void repair_vehicle();
     void flip_vehicle_upright();
     void boost_vehicle();
@@ -264,6 +266,12 @@ private:
     uint64_t m_fn_set_wanted = 0;
     uint64_t m_fn_vehicle_cheat = 0;
     uint64_t m_fn_tank_cheat = 0;
+    uint64_t m_fn_get_model_info = 0;
+
+    // Unlimited ammo: CWeapon::Fire's two ammo stores (clip, total) branch to stubs that skip
+    // the store when the shooter is the ped in this literal (0 = feature off).
+    void install_unlimited_ammo_patch(const lcs::cpu::ElfImage& image_game, lcs::cpu::DynarmicCore& cpu);
+    volatile uint64_t* m_ammo_player_literal = nullptr;
     uint64_t m_fn_fix_car = 0;
     uint64_t m_fn_force_weather = 0;
     uint64_t m_fn_text_get = 0;

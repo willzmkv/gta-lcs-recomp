@@ -132,22 +132,26 @@ namespace ui
                                 [](int d) { g_weaponIdx = (g_weaponIdx + d + kNumWep) % kNumWep; }});
                 rows.push_back({"Give Full Loadout", "APPLY", "Grants Pistol, Shotgun, MP5, M4, Sniper & RPG.", 0,
                                 [&tr] { tr.give_full_loadout(); }, nullptr});
-                addToggle("Unlimited Ammo", tr.unlimited_ammo, "Locks reserve ammo to 9999.");
+                addToggle("Unlimited Ammo", tr.unlimited_ammo, "Shots use no ammo: the clip never empties, no reload.");
                 addToggle("No Reload", tr.no_reload, "Keeps active magazine full while firing.");
                 break;
             }
 
             case TrainerPage::Vehicles:
             {
-                struct VehOpt { int id; const char *name; };
+                struct VehOpt { int id; const char *name; const char *model; };
+                // Ids from DEFAULT.IDE; the model is resolved by name in the game (VehOpt::model).
                 static constexpr VehOpt kVehs[] = {
-                    {131, "Infernus"}, {145, "Cheetah"}, {159, "Banshee"}, {141, "Stinger"},
-                    {132, "Taxi"}, {156, "Police Car"}, {162, "Rhino Tank"}, {178, "PCJ-600"},
+                    {142, "Infernus", "infernus"}, {146, "Cheetah", "cheetah"}, {160, "Banshee", "banshee"},
+                    {133, "Stinger", "stinger"}, {152, "Kuruma", "kuruma"}, {167, "Stallion", "stallion"},
+                    {136, "Sentinel", "sentinel"}, {151, "Taxi", "taxi"}, {157, "Police Car", "police"},
+                    {162, "Rhino Tank", "rhino"}, {205, "PCJ-600", "pcj600"}, {207, "Freeway", "freeway"},
+                    {210, "Sanchez", "sanchez"}, {214, "Maverick", "maverick"},
                 };
                 constexpr int kNumVeh = static_cast<int>(sizeof(kVehs) / sizeof(kVehs[0]));
                 rows.push_back({"Spawn Vehicle", std::string("< ") + kVehs[g_vehicleIdx].name + " >",
                                 "Left/Right to pick vehicle, Enter to spawn.", 0,
-                                [&tr] { tr.spawn_vehicle(kVehs[g_vehicleIdx].id); },
+                                [&tr] { tr.spawn_vehicle(kVehs[g_vehicleIdx].model, kVehs[g_vehicleIdx].id); },
                                 [](int d) { g_vehicleIdx = (g_vehicleIdx + d + kNumVeh) % kNumVeh; }});
                 rows.push_back({"Repair Vehicle", "APPLY", "Restores current vehicle health to 100%.", 0,
                                 [&tr] { tr.repair_vehicle(); }, nullptr});

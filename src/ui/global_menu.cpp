@@ -3013,17 +3013,25 @@ namespace ui
                 trAction("##ta_ars", "Arsenal completo (WeaponCheat3)", "APLICAR", [&] { tr.give_full_loadout(); },
                          "ARSENAL COMPLETO", "Concede o pacote completo de armas pesadas do GTA: Liberty City Stories.");
                 trToggle("##tg_amo", "Munição infinita", tr.unlimited_ammo,
-                         "MUNIÇÃO INFINITA", "Mantém a munição reserva travada em 9999 em todas as armas equipadas.");
+                         "MUNIÇÃO INFINITA", "Os disparos de Toni não gastam munição: o pente nunca esvazia e não há recarga. Inimigos não são afetados.");
                 trToggle("##tg_nrl", "Sem recarga", tr.no_reload,
                          "SEM RECARGA", "Mantém o pente sempre cheio durante disparos contínuos.");
                 break;
             }
             case 2: // VEÍCULOS
             {
-                static const char *kVehLbl[] = {"Infernus", "Cheetah", "Banshee", "Stinger", "Táxi", "Viatura LCPD", "Tanque Rhino", "PCJ-600"};
-                static constexpr int kVehId[] = {131, 145, 159, 141, 132, 156, 162, 178};
-                trCycleAction("##tc_veh", "Spawnar veículo (Enter / Clique)", g_vehicleIdx, kVehLbl, 8,
-                              [&](int i) { tr.spawn_vehicle(kVehId[i]); }, false,
+                // Model names from DEFAULT.IDE, resolved in the game; ids are only the fallback.
+                static const char *kVehLbl[] = {"Infernus", "Cheetah", "Banshee", "Stinger", "Kuruma", "Stallion",
+                                                "Sentinel", "Táxi", "Viatura LCPD", "Tanque Rhino", "PCJ-600",
+                                                "Freeway", "Sanchez", "Maverick"};
+                static const char *kVehModel[] = {"infernus", "cheetah", "banshee", "stinger", "kuruma", "stallion",
+                                                  "sentinel", "taxi", "police", "rhino", "pcj600",
+                                                  "freeway", "sanchez", "maverick"};
+                static constexpr int kVehId[] = {142, 146, 160, 133, 152, 167, 136, 151, 157, 162, 205, 207, 210, 214};
+                static_assert(std::size(kVehModel) == std::size(kVehId));
+                trCycleAction("##tc_veh", "Spawnar veículo (Enter / Clique)", g_vehicleIdx, kVehLbl,
+                              static_cast<int>(std::size(kVehLbl)),
+                              [&](int i) { tr.spawn_vehicle(kVehModel[i], kVehId[i]); }, false,
                               "SPAWNAR VEÍCULO", "Gera o veículo selecionado diretamente à frente do jogador.");
                 trAction("##ta_rep", "Consertar veículo atual", "APLICAR", [&] { tr.repair_vehicle(); },
                          "CONSERTAR VEÍCULO", "Restaura 100% da lataria e motor do veículo via CAutomobile::Fix.");
