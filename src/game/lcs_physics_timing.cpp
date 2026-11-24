@@ -426,6 +426,55 @@ void install_physics_timing_hooks(const lcs::cpu::ElfImage& image_game, lcs::cpu
     cpu.invalidate_cache(base_addr, 0x2000);
     std::cout << "  - Installed vehicle physics timing & braking lateral-grip hooks.\n";
 
+    // Blinking HUD: CHud::Draw tests bits 2/3 of CTimer::m_FrameCounter 8 times (flashing health,
+    // wanted stars, timers...), CDarkel::DrawMessages once (rampage texts): 4x too fast at 120 fps.
+    // Their GOT slots point to wrappers that set m_FrameCounter to the 30 fps count of the game
+    // clock (m_snTimeInMilliseconds * 3 / 100) for the call and restore it afterwards.
+    {
+        const uint64_t fc_va = image_game.find_symbol("_ZN6CTimer14m_FrameCounterE");
+        const uint64_t ms_va = image_game.find_symbol("_ZN6CTimer22m_snTimeInMillisecondsE");
+        struct Wrapped { uint64_t got_rva; const char* sym; };
+        static constexpr Wrapped kBlinkers[] = {
+            {0x806a48ULL, "_ZN4CHud4DrawEv"},
+            {0x804be8ULL, "_ZN7CDarkel12DrawMessagesEv"},
+        };
+        uint8_t* page = (fc_va && ms_va) ? alloc_stub_page() : nullptr;
+        int wrapped = 0;
+        for (size_t i = 0; page && i < std::size(kBlinkers); ++i) {
+            uint8_t* stub = page + i * 0x60;
+            const uint64_t stub_va = reinterpret_cast<uint64_t>(stub);
+            const uint64_t orig = patch_got(cpu, image_game.get_load_bias(), kBlinkers[i].got_rva, stub_va,
+                                            image_game, kBlinkers[i].sym);
+            if (!orig) continue;
+            static constexpr uint32_t kWrap[] = {
+                0xa9be7bfdu, // stp   x29, x30, [sp, #-32]!
+                0xf9000bf3u, // str   x19, [sp, #16]
+                0x58000210u, // ldr   x16, fc_ptr
+                0xb9400213u, // ldr   w19, [x16]          the real frame counter
+                0x58000211u, // ldr   x17, ms_ptr
+                0xb9400231u, // ldr   w17, [x17]
+                0x52800069u, // mov   w9, #3
+                0x9ba97e31u, // umull x17, w17, w9
+                0xd2800c89u, // mov   x9, #100
+                0x9ac90a31u, // udiv  x17, x17, x9        ms * 3 / 100: frames at 30 fps
+                0xb9000211u, // str   w17, [x16]
+                0x58000170u, // ldr   x16, orig
+                0xd63f0200u, // blr   x16
+                0x580000b0u, // ldr   x16, fc_ptr
+                0xb9000213u, // str   w19, [x16]          restored
+                0xf9400bf3u, // ldr   x19, [sp, #16]
+                0xa8c27bfdu, // ldp   x29, x30, [sp], #32
+                0xd65f03c0u, // ret
+            };
+            const uint64_t lits[3] = {fc_va, ms_va, orig};
+            std::memcpy(stub, kWrap, sizeof(kWrap));
+            std::memcpy(stub + 0x48, lits, sizeof(lits));
+            cpu.invalidate_cache(stub_va, 0x60);
+            ++wrapped;
+        }
+        std::cout << "  - Applied 30 fps blink rate to " << wrapped << " HUD draw functions.\n";
+    }
+
     // CScrollBar::Update (LED ticker signs): a per-instance frame counter scrolls the text one
     // column every 8 calls, tuned for 30 fps (4x too fast at 120 fps). Its GOT slot points to a
     // stub that runs the original only on frames where the 30 Hz tick (scrollbar_tick) is set.
