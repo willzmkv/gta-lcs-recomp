@@ -573,8 +573,19 @@ std::string rewrite_glsl_body_to_hlsl(
                 std::string l_str, r_str;
                 for (int k = l_start; k <= l_end; k++) l_str.append(pass1[k].text);
                 for (int k = r_start; k <= r_end; k++) r_str.append(pass1[k].text);
-                // Rewritten as mul(R, L) to match row_major column-as-row layout.
-                std::string rep = "mul(" + trim(r_str) + ", " + trim(l_str) + ")";
+                // HLSL with row_major matrices: GLSL (column-major) mat*vec = row_major mul(vec, mat)
+                // GLSL (column-major) vec*mat = row_major mul(mat, vec)
+                std::string rep;
+                if (lk == ExprKind::Mat && rk != ExprKind::Mat) {
+                    // GLSL mat*vec (col-major) = HLSL row_major mul(vec, mat)
+                    rep = "mul(" + trim(r_str) + ", " + trim(l_str) + ")";
+                } else if (rk == ExprKind::Mat && lk != ExprKind::Mat) {
+                    // GLSL vec*mat (col-major) = HLSL row_major mul(mat, vec)
+                    rep = "mul(" + trim(r_str) + ", " + trim(l_str) + ")";
+                } else {
+                    // Both matrices: mul(R, L) for right-to-left composition
+                    rep = "mul(" + trim(r_str) + ", " + trim(l_str) + ")";
+                }
                 std::vector<Tok> rep_toks = tokenize_glsl(rep);
                 pass1.erase(pass1.begin() + l_start, pass1.begin() + r_end + 1);
                 pass1.insert(pass1.begin() + l_start, rep_toks.begin(), rep_toks.end());
@@ -585,7 +596,11 @@ std::string rewrite_glsl_body_to_hlsl(
         if (!changed) break;
     }
 
+    // Note: Uniform/local mat4/mat3 use `#define mat4 row_major float4x4` and `glUniformMatrix*`
+    // copies GLSL column c directly into HLSL row c (`m[c]`), so `m[idx]` already indexes column c
+    // cleanly for both rvalues (`vc_scn_mat4_view[3]`) and lvalues (`BoneToLocal[0] += ...`).
     std::string final_body;
+
     for (const auto& t : pass1) final_body.append(t.text);
     return final_body;
 }
@@ -743,9 +758,14 @@ ShaderReflection reflect_glsl(const std::string& preprocessed_source) {
 TranslatedProgramHLSL translate_program_to_hlsl(
     const std::string& vs_preprocessed,
     const std::string& fs_preprocessed,
-    const std::unordered_map<std::string, int32_t>& bound_attrib_locations) {
+    const std::unordered_map<std::string, int32_t>& bound_attrib_locations,
+    uint32_t sint_mask,
+    uint32_t uint_mask) {
 
     TranslatedProgramHLSL result;
+    result.vs_preprocessed = vs_preprocessed;
+    result.fs_preprocessed = fs_preprocessed;
+    result.bound_attribs = bound_attrib_locations;
 
     ShaderReflection vs_refl = reflect_glsl(vs_preprocessed);
     ShaderReflection fs_refl = reflect_glsl(fs_preprocessed);
@@ -772,18 +792,22 @@ TranslatedProgramHLSL translate_program_to_hlsl(
         result.attribs.push_back(std::move(al));
     }
 
-    // 2. Merge unique uniforms & compute deterministic 16-byte register cbuffer layout
+    // 2. Merge unique uniforms & compute deterministic 16-byte register cbuffer layout.
+    // Place large arrays (e.g. bone palettes u_matBones[64]) at the tail so unskinned draws can upload a compact CB.
     std::unordered_set<std::string> seen_u;
     uint32_t next_reg = 0;
     int32_t next_sampler = 0;
-    auto add_uniform_list = [&](const std::vector<ShaderVariableInfo>& list) {
+    auto add_uniform_list = [&](const std::vector<ShaderVariableInfo>& list, bool large_arrays) {
         for (const auto& u : list) {
+            const bool is_sampler = (u.gl_type == 0x8B5E || u.gl_type == 0x8B60);
+            const bool is_large = !is_sampler && (u.array_size > 8);
+            if (is_large != large_arrays) continue;
             if (!seen_u.insert(u.name).second) continue;
             UniformMemberLayout mem;
             mem.name = u.name;
             mem.gl_type = u.gl_type;
             mem.array_size = std::max(1, u.array_size);
-            if (u.gl_type == 0x8B5E || u.gl_type == 0x8B60) {
+            if (is_sampler) {
                 mem.is_sampler = true;
                 mem.sampler_slot = next_sampler++;
             } else {
@@ -795,8 +819,10 @@ TranslatedProgramHLSL translate_program_to_hlsl(
             result.uniforms.push_back(std::move(mem));
         }
     };
-    add_uniform_list(vs_refl.uniforms);
-    add_uniform_list(fs_refl.uniforms);
+    add_uniform_list(vs_refl.uniforms, false);
+    add_uniform_list(fs_refl.uniforms, false);
+    add_uniform_list(vs_refl.uniforms, true);
+    add_uniform_list(fs_refl.uniforms, true);
     uint32_t raw_cb_bytes = std::max(16u, next_reg * 16);
     result.cbuffer_size = (raw_cb_bytes + 255u) & ~255u;
 
@@ -825,7 +851,19 @@ TranslatedProgramHLSL translate_program_to_hlsl(
            << "float2 gl_mod(float2 x, float2 y) { return x - y * floor(x / y); }\n"
            << "float3 gl_mod(float3 x, float3 y) { return x - y * floor(x / y); }\n"
            << "float4 gl_mod(float4 x, float4 y) { return x - y * floor(x / y); }\n"
-           << "#define mod gl_mod\n\n";
+           << "#define mod gl_mod\n"
+           << "float gl_pow(float x, float y) { return (!(x > 0.0f)) ? (y == 0.0f ? 1.0f : 0.0f) : pow(x, y); }\n"
+           << "float2 gl_pow(float2 x, float2 y) { return float2(gl_pow(x.x, y.x), gl_pow(x.y, y.y)); }\n"
+           << "float3 gl_pow(float3 x, float3 y) { return float3(gl_pow(x.x, y.x), gl_pow(x.y, y.y), gl_pow(x.z, y.z)); }\n"
+           << "float4 gl_pow(float4 x, float4 y) { return float4(gl_pow(x.x, y.x), gl_pow(x.y, y.y), gl_pow(x.z, y.z), gl_pow(x.w, y.w)); }\n"
+           << "#define pow gl_pow\n"
+           << "float gl_normalize(float v) { return (v != 0.0f) ? sign(v) : 0.0f; }\n"
+           << "float2 gl_normalize(float2 v) { float l = dot(v, v); return (l > 1e-12f) ? (v * rsqrt(l)) : float2(0.0f, 0.0f); }\n"
+           << "float3 gl_normalize(float3 v) { float l = dot(v, v); return (l > 1e-12f) ? (v * rsqrt(l)) : float3(0.0f, 0.0f, 0.0f); }\n"
+           << "float4 gl_normalize(float4 v) { float l = dot(v, v); return (l > 1e-12f) ? (v * rsqrt(l)) : float4(0.0f, 0.0f, 0.0f, 0.0f); }\n"
+           << "#define normalize gl_normalize\n"
+           << "float4 gl_mat4_col(row_major float4x4 m, int c) { return m[c]; }\n"
+           << "float3 gl_mat4_col(row_major float3x3 m, int c) { return m[c]; }\n\n";
 
     // cbuffer b0
     bool has_cbuf_vars = false;
@@ -845,6 +883,10 @@ TranslatedProgramHLSL translate_program_to_hlsl(
         }
         shared << "};\n\n";
     }
+
+    shared << "cbuffer PCColorGradeCB : register(b1) {\n"
+           << "    float4 pc_color_grade;\n"
+           << "};\n\n";
 
     for (const auto& u : result.uniforms) {
         if (!u.is_sampler) continue;
@@ -880,11 +922,38 @@ TranslatedProgramHLSL translate_program_to_hlsl(
 
     // 4. Build Vertex Shader HLSL
     {
+        auto vs_input_type = [&](const AttribLayout& a) -> std::string {
+            if (a.location >= 0 && a.location < 16) {
+                const uint32_t bit = 1u << static_cast<uint32_t>(a.location);
+                if (sint_mask & bit) return "int4";
+                if (uint_mask & bit) return "uint4";
+            }
+            return hlsl_type_from_gl_type(a.gl_type);
+        };
+        auto vs_input_assign = [&](const AttribLayout& a) -> std::string {
+            if (a.location >= 0 && a.location < 16) {
+                const uint32_t bit = 1u << static_cast<uint32_t>(a.location);
+                if ((sint_mask | uint_mask) & bit) {
+                    switch (a.gl_type) {
+                        case 0x1406: return "(float)_in." + a.name + ".x";
+                        case 0x8B50: return "(float2)_in." + a.name + ".xy";
+                        case 0x8B51: return "(float3)_in." + a.name + ".xyz";
+                        case 0x1404: return "(int)_in." + a.name + ".x";
+                        case 0x8B53: return "(int2)_in." + a.name + ".xy";
+                        case 0x8B54: return "(int3)_in." + a.name + ".xyz";
+                        case 0x8B55: return "(int4)_in." + a.name;
+                        default:     return "(float4)_in." + a.name;
+                    }
+                }
+            }
+            return "_in." + a.name;
+        };
+
         std::ostringstream vs;
         vs << shared.str();
         vs << "struct VSInput {\n";
         for (const auto& a : result.attribs) {
-            vs << "    " << hlsl_type_from_gl_type(a.gl_type) << " "
+            vs << "    " << vs_input_type(a) << " "
                << a.name << " : ATTR" << a.location << ";\n";
         }
         if (result.attribs.empty()) {
@@ -906,7 +975,7 @@ TranslatedProgramHLSL translate_program_to_hlsl(
 
         vs << "PSInput main(VSInput _in) {\n";
         for (const auto& a : result.attribs) {
-            vs << "    " << a.name << " = _in." << a.name << ";\n";
+            vs << "    " << a.name << " = " << vs_input_assign(a) << ";\n";
         }
         vs << "    gl_Position = float4(0.0, 0.0, 0.0, 1.0);\n";
         for (const auto& v : varyings) {

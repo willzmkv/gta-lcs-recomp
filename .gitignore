@@ -1,17 +1,21 @@
 # ==========================================
 # GTA Liberty City Stories PC - .gitignore
+# Never commit game data, binaries or anything derived from them (AGENTS.md).
 # ==========================================
 
-# Game data, ROMs, APKs, IPAs, WADs
+# Game data, ROMs, APKs, IPAs, WADs and archives of them
 *.ipa
 *.apk
 *.apks
 *.apkm
 *.xapk
+*.obb
 *.wad
 *.iso
 *.cso
-*.bin
+*.zip
+*.7z
+*.rar
 
 # Binaries and compiled libraries
 *.exe
@@ -24,27 +28,42 @@ lcs_runtime
 gtalcs/lcs_runtime
 gtalcs.zip
 
-# Proprietary extracted game files
-assets/
-gtalcs/gamefiles/
-gtalcs/gamedata/
-gtalcs/userdata/
-gtalcs/logs/
-gtalcs/.setup/
+# Proprietary extracted game files.
+# gtalcs/ and modloader/ are junctions to the user's install on the dev machine:
+# their few tracked files (port metadata) are marked skip-worktree locally.
+/assets/
+/gtalcs/
+/modloader/
 extracted/
 extracted_ipa/
 extracted_apk/
 converted_textures/
+/Grand Theft Auto - Liberty City Stories (USA)/
+/Tradução Definitiva GTA LCS Android/
+/Upscaled LCS Artworks/
 
-# User data and saves
+# Game imagery used by the launcher (extracted/upscaled from the game, or game maps)
+launcher/assets/characters/
+launcher/assets/characters_orig/
+launcher/assets/mainmenu/
+launcher/assets/menu_backdrop.png
+launcher/assets/liberty_city_hd_map.png
+/*.jpg
+/*.webp
+
+# User data, saves and runtime settings
 *.b
 *.set
 logs/
 userdata/
 saves/
+/lcs.ini
+/launcher.ini
+/testwrite
 
 # Build directories
-build/
+/build/
+/Release/
 bin/
 out/
 dist/
@@ -60,6 +79,12 @@ cmake_install.cmake
 *.pdb
 *.ilk
 *.exp
+__pycache__/
+*.pyc
+
+# Diagnostics and agent scratch
+/scratch/
+.maestro-traces/
 
 # IDE and system
 .vs/
@@ -71,5 +96,3 @@ CMakeUserPresets.json
 *.user
 Thumbs.db
 .DS_Store
-scratch/
-testwrite

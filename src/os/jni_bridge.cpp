@@ -1,12 +1,20 @@
 #include "jni_bridge.h"
 #include "cpu/dynarmic_core.h"
 #include "cpu/callbacks.h"
+#include "audio/audio_system.h"
+#include "graphics/video_player.h"
+#include "graphics/render_bridge.h"
+#include "graphics/window.h"
+#include "settings/settings.h"
 
+#include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <filesystem>
 #include <cstring>
+#include <ratio>
 
 #if defined(LCS_PLATFORM_WINDOWS)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -27,6 +35,9 @@ JNIBridge& JNIBridge::instance() {
 JNIBridge::JNIBridge() = default;
 
 JNIBridge::~JNIBridge() {
+    if (m_video_player) {
+        m_video_player->close();
+    }
     if (m_memory_block) {
 #if defined(LCS_PLATFORM_WINDOWS)
         VirtualFree(m_memory_block, 0, MEM_RELEASE);
@@ -39,6 +50,7 @@ JNIBridge::~JNIBridge() {
 
 bool JNIBridge::initialize(cpu::DynarmicCore& cpu, cpu::HLEManager& hle) {
     if (m_memory_block) return true;
+    m_cpu = &cpu;
 
     // Allocate 1 MB for JNI data, tables, and heap at 0x7f60300000
 #if defined(LCS_PLATFORM_WINDOWS)
@@ -77,6 +89,9 @@ bool JNIBridge::initialize(cpu::DynarmicCore& cpu, cpu::HLEManager& hle) {
     std::cout << "    * Registered " << m_classes.size() << " classes and "
               << m_methods.size() << " pre-bound methods.\n";
 
+    // Initialize video player for cutscenes
+    m_video_player = std::make_unique<lcs::graphics::VideoPlayer>();
+
     return true;
 }
 
@@ -94,7 +109,11 @@ void JNIBridge::build_invoke_table(cpu::HLEManager& hle) {
             *reinterpret_cast<uint64_t*>(env_out_ptr) = JNI_GUEST_ENV_ADDR;
         }
 
-        std::cout << "[JNI] JavaVM::GetEnv(version=0x" << std::hex << version << ") -> JNI_OK\n" << std::dec;
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            std::cout << "[JNI] JavaVM::GetEnv(version=0x" << std::hex << version << ") -> JNI_OK\n" << std::dec;
+        }
         return 0; // JNI_OK
     });
 
@@ -104,7 +123,11 @@ void JNIBridge::build_invoke_table(cpu::HLEManager& hle) {
         if (env_out_ptr) {
             *reinterpret_cast<uint64_t*>(env_out_ptr) = JNI_GUEST_ENV_ADDR;
         }
-        std::cout << "[JNI] JavaVM::AttachCurrentThread() -> JNI_OK\n";
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            std::cout << "[JNI] JavaVM::AttachCurrentThread() -> JNI_OK\n";
+        }
         return 0; // JNI_OK
     });
 
@@ -357,6 +380,8 @@ void JNIBridge::setup_known_classes_and_methods() {
         const char* retType;
     } defs[] = {
         {"com/rockstargames/gtalcs/CommonAPI", "PlayVideo", "(Ljava/lang/String;)V", true, "void"},
+        {"com/rockstargames/hal/andVideo", "PlayVideoFile", "(Ljava/lang/String;)V", true, "void"},
+        {"com/rockstargames/hal/andVideo", "createVideo", "()V", true, "void"},
         {"com/rockstargames/gtalcs/CommonAPI", "PlaylistBeginInit", "(Ljava/lang/String;)V", true, "void"},
         {"com/rockstargames/gtalcs/CommonAPI", "PlaylistFinishInit", "(Z)V", true, "void"},
         {"com/rockstargames/gtalcs/CommonAPI", "isVideoPlaying", "()Z", true, "bool"},
@@ -509,7 +534,35 @@ uint64_t JNIBridge::handle_get_method_id(uint64_t clazz, const char* name, const
 
 uint64_t JNIBridge::handle_call_method(uint64_t target, uint64_t method_handle, const uint64_t* args, bool is_static, bool is_va) {
     (void)target;
-    (void)is_va;
+    // Extract an integer/pointer/object argument (handling AArch64 AAPCS64 va_list GP slots).
+    auto extract_arg_u64 = [&](uint32_t arg_index) -> uint64_t {
+        uint64_t raw = args[3];
+        if (is_va && raw >= 0x7f60000000ULL && raw <= 0x7f601f0000ULL - 32) {
+            struct AArch64VaList {
+                uint64_t stack;
+                uint64_t gr_top;
+                uint64_t vr_top;
+                int32_t  gr_offs;
+                int32_t  vr_offs;
+            };
+            const auto* va = reinterpret_cast<const AArch64VaList*>(raw);
+            int32_t gp_off = va->gr_offs + static_cast<int32_t>(arg_index) * 8;
+            uint64_t arg_addr = 0;
+            if (va->gr_offs < 0 && gp_off < 0 && gp_off >= -64 && va->gr_top != 0) {
+                arg_addr = static_cast<uint64_t>(static_cast<int64_t>(va->gr_top) + gp_off);
+            } else if (va->stack != 0) {
+                int32_t num_gp_in_regs = (va->gr_offs < 0) ? ((-va->gr_offs) / 8) : 0;
+                int32_t stack_slot = static_cast<int32_t>(arg_index) - num_gp_in_regs;
+                if (stack_slot >= 0) {
+                    arg_addr = va->stack + static_cast<uint64_t>(stack_slot) * 8;
+                }
+            }
+            if (arg_addr != 0) {
+                return *reinterpret_cast<const uint64_t*>(arg_addr);
+            }
+        }
+        return (3 + arg_index < 8) ? args[3 + arg_index] : 0;
+    };
 
     uint32_t method_id = static_cast<uint32_t>((method_handle - JNI_GUEST_METHOD_BASE) / 0x40);
     if (method_id >= m_methods.size()) {
@@ -522,10 +575,16 @@ uint64_t JNIBridge::handle_call_method(uint64_t target, uint64_t method_handle, 
               << m.className << "." << m.methodName << m.signature << "\n";
 
     if (m.methodName == "GetDeviceLanguage") {
-        return create_string_utf("en");
+        static constexpr const char* kLangCodes[] = {"en", "fr", "de", "it", "es", "ru", "ja"};
+        const int raw_lang = std::clamp(lcs::settings::get().game_language, 0, 7);
+        const int idx = (raw_lang == 7) ? 0 : raw_lang;
+        return create_string_utf(kLangCodes[idx]);
     }
     else if (m.methodName == "GetVersionName") {
         return create_string_utf("2.4.379");
+    }
+    else if (m.methodName == "isVideoPlaying" || m.methodName == "IsVideoPlaying") {
+        return is_video_playing() ? 1 : 0;
     }
     else if (m.methodName == "CheckGate") {
         return 0; // Gate passed
@@ -549,8 +608,103 @@ uint64_t JNIBridge::handle_call_method(uint64_t target, uint64_t method_handle, 
         m_pending.start_game_before_load = true;
         return 0;
     }
+    else if (m.methodName == "PlayVideo" || m.methodName == "PlayVideoFile") {
+        uint64_t str_handle = extract_arg_u64(0);
+        
+        std::cout << "[JNI] PlayVideo raw handle: 0x" << std::hex << str_handle << std::dec << "\n";
+        
+        // Resolve jstring to UTF-8 using our new helper
+        std::string video_path = resolve_jstring(str_handle);
+        
+        std::cout << "[JNI] PlayVideo called with path: " << (video_path.empty() ? "NULL" : video_path.c_str()) << "\n";
+        
+        if (!video_path.empty() && m_video_player) {
+            std::string full_path = "gtalcs/gamefiles/assets/" + video_path;
+            if (!std::filesystem::exists(full_path)) {
+                std::string movies_path = "gtalcs/gamefiles/assets/Movies/" + video_path;
+                if (std::filesystem::exists(movies_path)) {
+                    full_path = movies_path;
+                }
+            }
+            
+            std::cout << "[JNI] Looking for video at: " << full_path << " (exists: " << std::filesystem::exists(full_path) << ")\n";
+            
+            if (std::filesystem::exists(full_path)) {
+                if (m_video_player->open(full_path, false)) {
+                    lcs::audio::clear_video_audio();
+                    m_video_player->play();
+                    m_video_has_first_frame = false;
+                    m_video_last_pts_100ns = -1;
+                    m_video_audio_last_pts_100ns = -1;
+                    m_video_frame_count = 0;
+                    m_video_start_time = std::chrono::steady_clock::now();
+                    update_video(false);
+                    std::cout << "[JNI] Started video playback: " << full_path << "\n";
+                    return 0;
+                } else {
+                    std::cerr << "[JNI] Failed to open video file: " << full_path << "\n";
+                }
+            } else {
+                std::cerr << "[JNI] Video file not found: " << full_path << "\n";
+            }
+        }
+        
+        // Fallback: immediate completion if video fails or not found
+        m_pending.video_finished = true;
+        return 0;
+    }
     else if (m.methodName == "ShowGate") {
         m_pending.start_game = true;
+        return 0;
+    }
+    else if (m.methodName == "ShowLoadingScreen") {
+        lcs::graphics::pump_loading_events();
+        lcs::graphics::RenderBridge::instance().present_loading_bar(0.0f);
+        return 0;
+    }
+    else if (m.methodName == "HideLoadingScreen") {
+        lcs::graphics::RenderBridge::instance().set_loading_bar(false, 0.0f);
+        return 0;
+    }
+    else if (m.methodName == "ShowLoadingBar") {
+        float progress = 0.0f;
+        uint64_t raw = args[3];
+        if (is_va && raw >= 0x7f60000000ULL && raw <= 0x7f601f0000ULL - 32) {
+            struct AArch64VaList {
+                uint64_t stack;
+                uint64_t gr_top;
+                uint64_t vr_top;
+                int32_t  gr_offs;
+                int32_t  vr_offs;
+            };
+            const auto* va = reinterpret_cast<const AArch64VaList*>(raw);
+            if (va->vr_offs < 0 && va->vr_top != 0) {
+                const uint64_t faddr = static_cast<uint64_t>(static_cast<int64_t>(va->vr_top) + va->vr_offs);
+                double dval = 0.0;
+                float fval = 0.0f;
+                std::memcpy(&dval, reinterpret_cast<const void*>(faddr), sizeof(double));
+                std::memcpy(&fval, reinterpret_cast<const void*>(faddr), sizeof(float));
+                if (std::isfinite(dval) && dval >= 0.0001 && dval <= 100.0) {
+                    progress = static_cast<float>(dval);
+                } else if (std::isfinite(fval) && fval >= 0.0f && fval <= 100.0f) {
+                    progress = fval;
+                }
+            }
+        } else if (m_cpu) {
+            progress = m_cpu->get_fp_float(0);
+        }
+        if (!std::isfinite(progress) || progress < 0.0f) progress = 0.0f;
+        if (progress > 1.0f) progress *= 0.01f;
+        progress = std::clamp(progress, 0.0f, 1.0f);
+
+        lcs::graphics::RenderBridge::instance().set_loading_bar(true, progress);
+        static auto s_last_pump = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        if (now - s_last_pump >= std::chrono::milliseconds(33)) {
+            s_last_pump = now;
+            lcs::graphics::pump_loading_events();
+            lcs::graphics::RenderBridge::instance().present_loading_bar(progress);
+        }
         return 0;
     }
     else if (m.methodName == "QuitApp") {
@@ -558,7 +712,7 @@ uint64_t JNIBridge::handle_call_method(uint64_t target, uint64_t method_handle, 
         return 0;
     }
     else if (m.methodName == "readUserFile") {
-        uint64_t str_handle = args[3];
+        uint64_t str_handle = extract_arg_u64(0);
         const char* fname = get_string_utf_chars(str_handle);
         if (fname && fname[0] != '\0') {
             std::filesystem::path fpath = std::filesystem::path(m_userdata_dir) / fname;
@@ -574,8 +728,8 @@ uint64_t JNIBridge::handle_call_method(uint64_t target, uint64_t method_handle, 
         return 0; // null, file not found
     }
     else if (m.methodName == "writeUserFile") {
-        uint64_t path_handle = args[3];
-        uint64_t data_handle = args[4];
+        uint64_t path_handle = extract_arg_u64(0);
+        uint64_t data_handle = extract_arg_u64(1);
         const char* fname = get_string_utf_chars(path_handle);
         const char* data = get_string_utf_chars(data_handle);
         if (fname && data) {
@@ -677,10 +831,226 @@ const char* JNIBridge::get_string_utf_chars(uint64_t string_obj) {
     return "";
 }
 
+// Resolve a jstring handle to a UTF-8 string using CPU memory access
+// Returns empty string if resolution fails
+std::string JNIBridge::resolve_jstring(uint64_t jstring_handle) {
+    // Check cache first
+    auto it = m_string_objects.find(jstring_handle);
+    if (it != m_string_objects.end()) {
+        return it->second;
+    }
+    
+    // Check if it's a direct pointer in our heap
+    if (jstring_handle >= JNI_GUEST_HEAP_BASE && jstring_handle < JNI_GUEST_HEAP_BASE + JNI_GUEST_HEAP_SIZE) {
+        const char* direct = reinterpret_cast<const char*>(jstring_handle);
+        if (direct[0] != '\0') {
+            return std::string(direct);
+        }
+    }
+    
+    // Try to parse Java String object from guest memory using CPU memory access
+    // Java String object layout (Android ART 64-bit, uncompressed pointers):
+    // offset 0x00: klass pointer (8 bytes)
+    // offset 0x08: monitor (8 bytes)
+    // offset 0x10: value (Handle<char[]>) - 8 bytes, reference to char[] array
+    // offset 0x18: hash_code (int32, 4 bytes)
+    // offset 0x1C: coder (uint8_t, 1 byte) - 0=LATIN1, 1=UTF-16
+    // offset 0x1D: hash_is_zero (bool, 1 byte)
+    // The char[] array layout:
+    //   offset 0x00: klass pointer (8 bytes)
+    //   offset 0x08: monitor (8 bytes)
+    //   offset 0x10: length (int32, 4 bytes)
+    //   offset 0x14: data (char[]) - UTF-16 (2 bytes/char) or LATIN1 (1 byte/char)
+    
+    if (jstring_handle == 0) {
+        return "";
+    }
+    
+    // Get current CPU to access guest memory
+    auto* cpu = lcs::cpu::DynarmicCore::current();
+    if (!cpu) {
+        return "";
+    }
+    
+    // Read value field (Handle<char[]>) at offset 0x10
+    uint64_t value_ref = 0;
+    if (!lcs::cpu::DynarmicCore::read_guest_memory(jstring_handle + 0x10, &value_ref, sizeof(value_ref))) {
+        return "";
+    }
+    
+    // Read coder at offset 0x1C
+    uint8_t coder = 0;
+    if (!lcs::cpu::DynarmicCore::read_guest_memory(jstring_handle + 0x1C, &coder, sizeof(coder))) {
+        return "";
+    }
+    
+    if (value_ref == 0) {
+        return "";
+    }
+    
+    // Parse the char[] array at value_ref
+    // char[] array layout:
+    //   offset 0x00: klass pointer (8 bytes)
+    //   offset 0x08: monitor (8 bytes)
+    //   offset 0x10: length (int32, 4 bytes)
+    //   offset 0x14: data (char[]) - UTF-16 (2 bytes/char) or LATIN1 (1 byte/char)
+    
+    int32_t char_length = 0;
+    if (!lcs::cpu::DynarmicCore::read_guest_memory(value_ref + 0x10, &char_length, sizeof(char_length))) {
+        return "";
+    }
+    
+    if (char_length <= 0 || char_length >= 1024) {
+        return "";
+    }
+    
+    // coder already read above at line 795
+    
+    std::string result;
+    result.reserve(char_length);
+    
+    if (coder == 0) {
+        // LATIN1 - 1 byte per char
+        std::vector<uint8_t> latin1_data(char_length);
+        if (!lcs::cpu::DynarmicCore::read_guest_memory(value_ref + 0x14, latin1_data.data(), char_length)) {
+            return "";
+        }
+        for (int i = 0; i < char_length; i++) {
+            // Convert LATIN1 to UTF-8 (ASCII subset)
+            if (latin1_data[i] <= 0x7F) {
+                result.push_back(static_cast<char>(latin1_data[i]));
+            } else {
+                // Non-ASCII LATIN1 - convert to UTF-8
+                result.push_back(static_cast<char>(0xC0 | (latin1_data[i] >> 6)));
+                result.push_back(static_cast<char>(0x80 | (latin1_data[i] & 0x3F)));
+            }
+        }
+    } else if (coder == 1) {
+        // UTF-16 - 2 bytes per char
+        std::vector<uint16_t> utf16_data(char_length);
+        if (!lcs::cpu::DynarmicCore::read_guest_memory(value_ref + 0x14, utf16_data.data(), char_length * sizeof(uint16_t))) {
+            return "";
+        }
+        for (int i = 0; i < char_length; i++) {
+            uint16_t c = utf16_data[i];
+            if (c <= 0x7F) {
+                result.push_back(static_cast<char>(c));
+            } else if (c <= 0x7FF) {
+                result.push_back(static_cast<char>(0xC0 | (c >> 6)));
+                result.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+            } else {
+                result.push_back(static_cast<char>(0xE0 | (c >> 12)));
+                result.push_back(static_cast<char>(0x80 | ((c >> 6) & 0x3F)));
+                result.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+            }
+        }
+    }
+    
+    return result;
+}
+
 JNIBridge::PendingCallbacks JNIBridge::consume_pending_callbacks() {
     PendingCallbacks out = m_pending;
     m_pending = PendingCallbacks{};
     return out;
+}
+
+bool JNIBridge::is_video_playing() const {
+    return m_video_player && m_video_player->is_playing();
+}
+
+void JNIBridge::skip_video() {
+    if (!m_video_player || !m_video_player->is_playing()) return;
+    m_video_player->close();
+    lcs::audio::clear_video_audio();
+    std::vector<uint8_t>().swap(m_video_frame_rgba);
+    std::vector<int16_t>().swap(m_video_audio_pcm);
+    m_video_has_first_frame = false;
+    m_video_last_pts_100ns = -1;
+    m_video_audio_last_pts_100ns = -1;
+    lcs::graphics::RenderBridge::instance().clear_video_frame();
+    m_pending.video_finished = true;
+}
+
+void JNIBridge::update_video(bool smoke_test) {
+    if (!m_video_player || !m_video_player->is_playing()) return;
+
+    if (smoke_test && m_video_frame_count >= 30) {
+        std::cout << "[SmokeTest] Skipping intro video after " << m_video_frame_count << " decoded frames.\n";
+        skip_video();
+        return;
+    }
+
+    auto pump_video_audio = [&](int64_t target_pts_100ns) {
+        if (!m_video_player->has_audio()) return;
+        constexpr int64_t kAhead100ns = 2500000LL; // 250 ms buffer ahead of video PTS
+        int packets = 0;
+        while (m_video_audio_last_pts_100ns < target_pts_100ns + kAhead100ns && packets < 32) {
+            int64_t apts = 0;
+            if (!m_video_player->read_audio_samples(m_video_audio_pcm, apts)) break;
+            m_video_audio_last_pts_100ns = apts;
+            if (!smoke_test && !m_video_audio_pcm.empty()) {
+                lcs::audio::queue_video_audio(m_video_audio_pcm.data(), m_video_audio_pcm.size() / 2);
+            }
+            packets++;
+        }
+    };
+
+    int64_t pts = 0;
+    if (!m_video_has_first_frame) {
+        if (!m_video_player->read_frame(m_video_frame_rgba, pts)) {
+            skip_video();
+            return;
+        }
+        m_video_has_first_frame = true;
+        m_video_last_pts_100ns = pts;
+        m_video_start_time = std::chrono::steady_clock::now();
+        m_video_frame_count = 1;
+        lcs::graphics::RenderBridge::instance().set_video_frame(
+            m_video_player->get_width(), m_video_player->get_height(), m_video_frame_rgba.data());
+        pump_video_audio(pts);
+        return;
+    }
+
+    if (smoke_test) {
+        if (!m_video_player->read_frame(m_video_frame_rgba, pts)) {
+            skip_video();
+            return;
+        }
+        m_video_last_pts_100ns = pts;
+        m_video_frame_count++;
+        lcs::graphics::RenderBridge::instance().set_video_frame(
+            m_video_player->get_width(), m_video_player->get_height(), m_video_frame_rgba.data());
+        pump_video_audio(pts);
+        return;
+    }
+
+    auto elapsed_100ns = std::chrono::duration_cast<std::chrono::duration<int64_t, std::ratio<1, 10000000>>>(
+        std::chrono::steady_clock::now() - m_video_start_time).count();
+    if (elapsed_100ns > m_video_last_pts_100ns + 2500000LL) {
+        m_video_start_time = std::chrono::steady_clock::now() -
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<int64_t, std::ratio<1, 10000000>>(m_video_last_pts_100ns));
+        elapsed_100ns = m_video_last_pts_100ns + 333333LL;
+    }
+
+    int decoded = 0;
+    bool got_new = false;
+    while (m_video_last_pts_100ns < elapsed_100ns && decoded < 3) {
+        if (!m_video_player->read_frame(m_video_frame_rgba, pts)) {
+            skip_video();
+            return;
+        }
+        m_video_last_pts_100ns = pts;
+        m_video_frame_count++;
+        decoded++;
+        got_new = true;
+    }
+    if (got_new) {
+        lcs::graphics::RenderBridge::instance().set_video_frame(
+            m_video_player->get_width(), m_video_player->get_height(), m_video_frame_rgba.data());
+    }
+    pump_video_audio(std::max<int64_t>(0, m_video_last_pts_100ns));
 }
 
 } // namespace lcs::os

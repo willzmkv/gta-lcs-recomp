@@ -69,6 +69,9 @@ public:
     // SVC Handling
     void register_svc_handler(uint32_t swi, SVCHandler handler);
 
+    // Read guest memory directly (guest and host share address space)
+    static bool read_guest_memory(uint64_t vaddr, void* out, size_t size);
+
     struct Impl;
 private:
     std::unique_ptr<Impl> m_impl;

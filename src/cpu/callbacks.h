@@ -42,6 +42,9 @@ public:
     // Register default stubs (Bionic, libc, pthreads, system, JNI, GLES, OpenAL)
     void register_default_stubs();
 
+    static void set_render_thread_id(uint32_t tid);
+    static void high_res_sleep_ns(uint64_t ns);
+
 private:
     HLEManager();
     ~HLEManager();

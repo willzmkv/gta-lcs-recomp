@@ -47,6 +47,9 @@ public:
     void queue_joy_button_down(int joy_id, int button);
     void queue_joy_button_up(int joy_id, int button);
     void queue_joy_axis(int joy_id, int axis, float value);
+    void set_kb_axes(float lx, float ly, float l2, float r2);
+    void clear_pad_state();
+    void release_all_guest_inputs();
     void queue_back_button();
 
     // Poll XInput gamepads and queue gamepad events
@@ -56,12 +59,26 @@ public:
     void dispatch_events(lcs::cpu::DynarmicCore& cpu, uint64_t env_addr, uint64_t dummy_clazz);
 
     bool is_initialized() const { return m_initialized; }
+    bool is_joy_button_held(int joy_id, int button) const;
+    float get_joy_axis(int joy_id, int axis) const;
+    float get_pad_axis(int joy_id, int axis) const;
+    // Classic PS2 scheme sends L2/R2 controller triggers to CPad look axes (4/5); modern Xbox/PS5/Switch schemes do not.
+    void set_classic_ps2_triggers(bool classic) { m_classic_ps2_triggers = classic; }
+    bool classic_ps2_triggers() const { return m_classic_ps2_triggers; }
+    // Suppress forwarding right-stick axes (2, 3) to guest while Free Aim reads physical axes directly.
+    void set_suppress_right_stick(bool suppress) { m_suppress_right_stick = suppress; }
+    // Suppress forwarding new button/touch/axis presses to guest while UI overlay (Main Menu / Pause) is active.
+    void set_block_guest_presses(bool block) { m_block_guest_presses = block; }
 
 private:
     InputSystem() = default;
 
-    std::mutex m_mutex;
+    mutable std::mutex m_mutex;
     std::vector<RawInputEvent> m_queue;
+    bool m_joy0_buttons[16] = {};
+    float m_pad_axes[6] = {};
+    float m_kb_axes[6] = {};
+    float m_sent_guest_axes[6] = {};
 
     uint64_t m_fn_touch_start = 0;
     uint64_t m_fn_touch_move = 0;
@@ -74,6 +91,9 @@ private:
 
     bool m_initialized = false;
     bool m_joysticks_enabled = false;
+    bool m_suppress_right_stick = false;
+    bool m_block_guest_presses = false;
+    bool m_classic_ps2_triggers = false;
 
     // Previous gamepad state for edge detection
     uint32_t m_prev_xinput_buttons = 0;

@@ -678,6 +678,61 @@ void register_thread_hle(lcs::cpu::HLEManager& hle) {
         return 0;
     });
 
+    // Named POSIX semaphores (used by CdStreamThread in libGame.so)
+    struct NamedSemaphoreTable {
+        std::mutex m;
+        std::unordered_map<std::string, uint64_t> by_name;
+        uint64_t next_handle = 0x7f60500000ULL;
+    };
+    auto* named_sems = immortal<NamedSemaphoreTable>();
+
+    hle.register_function("sem_open", [named_sems](const uint64_t* args) -> uint64_t {
+        const char* name = reinterpret_cast<const char*>(args[0]);
+        if (!name) return set_errno_fail(static_cast<int>(G_EINVAL));
+        std::string key(name);
+        uint64_t handle = 0;
+        bool created = false;
+        {
+            std::lock_guard<std::mutex> lk(named_sems->m);
+            auto it = named_sems->by_name.find(key);
+            if (it != named_sems->by_name.end()) {
+                handle = it->second;
+            } else {
+                handle = named_sems->next_handle;
+                named_sems->next_handle += 16;
+                named_sems->by_name[key] = handle;
+                created = true;
+            }
+        }
+        if (created) {
+            GuestSemaphore& s = semaphores().get(handle);
+            std::lock_guard<std::mutex> lk(s.m);
+            s.count = static_cast<uint32_t>(args[3]);
+        }
+        return handle;
+    });
+    hle.register_function("sem_close", [](const uint64_t*) -> uint64_t { return 0; });
+    hle.register_function("sem_unlink", [named_sems](const uint64_t* args) -> uint64_t {
+        const char* name = reinterpret_cast<const char*>(args[0]);
+        if (!name) return set_errno_fail(static_cast<int>(G_EINVAL));
+        std::lock_guard<std::mutex> lk(named_sems->m);
+        named_sems->by_name.erase(name);
+        return 0;
+    });
+
+    hle.register_function("nanosleep", [](const uint64_t* args) -> uint64_t {
+        const int64_t* req = reinterpret_cast<const int64_t*>(args[0]);
+        if (!req || req[0] < 0 || req[1] < 0 || req[1] >= 1000000000LL) {
+            return set_errno_fail(static_cast<int>(G_EINVAL));
+        }
+        const uint64_t ns = static_cast<uint64_t>(req[0]) * 1'000'000'000ULL +
+                            static_cast<uint64_t>(req[1]);
+        if (ns > 0) {
+            lcs::cpu::HLEManager::high_res_sleep_ns(ns);
+        }
+        return 0;
+    });
+
     // --- C++ ABI thread-safe static initialization guards ---------------------
     hle.register_function("__cxa_guard_acquire", [](const uint64_t* args) -> uint64_t {
         uint8_t* guard = reinterpret_cast<uint8_t*>(args[0]);

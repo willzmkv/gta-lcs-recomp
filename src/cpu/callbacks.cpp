@@ -7,8 +7,91 @@
 #include <iostream>
 #include <cstring>
 #include <cstdlib>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <sched.h>
+#include <time.h>
+#endif
+
+namespace {
+std::atomic<uint32_t> g_render_thread_id{0};
+
+#if defined(_WIN32)
+constexpr DWORD kCreateWaitableTimerHighResolution = 0x00000002u;
+
+struct HighResTimerHandle {
+    HANDLE handle = nullptr;
+    HighResTimerHandle() {
+        handle = CreateWaitableTimerExW(nullptr, nullptr, kCreateWaitableTimerHighResolution, TIMER_ALL_ACCESS);
+        if (!handle) {
+            handle = CreateWaitableTimerW(nullptr, FALSE, nullptr);
+        }
+    }
+    ~HighResTimerHandle() {
+        if (handle) {
+            CloseHandle(handle);
+        }
+    }
+    HighResTimerHandle(const HighResTimerHandle&) = delete;
+    HighResTimerHandle& operator=(const HighResTimerHandle&) = delete;
+};
+
+void wait_high_res_100ns(int64_t wait_100ns) {
+    if (wait_100ns <= 0) return;
+    thread_local HighResTimerHandle t_timer;
+    if (t_timer.handle) {
+        LARGE_INTEGER due;
+        due.QuadPart = -wait_100ns;
+        if (SetWaitableTimer(t_timer.handle, &due, 0, nullptr, nullptr, FALSE)) {
+            WaitForSingleObject(t_timer.handle, INFINITE);
+            return;
+        }
+    }
+    const DWORD ms = static_cast<DWORD>(wait_100ns >= 10000 ? wait_100ns / 10000 : 1);
+    Sleep(ms);
+}
+#endif
+} // namespace
+
+namespace lcs::cpu {
+void HLEManager::set_render_thread_id(uint32_t tid) {
+    g_render_thread_id.store(tid, std::memory_order_relaxed);
+}
+
+void HLEManager::high_res_sleep_ns(uint64_t ns) {
+#if defined(_WIN32)
+    if (ns == 0) {
+        Sleep(0);
+        return;
+    }
+    const uint32_t render_tid = g_render_thread_id.load(std::memory_order_relaxed);
+    if (render_tid != 0 && GetCurrentThreadId() == render_tid && ns <= 1'500'000ULL) {
+        // Yield briefly on the render thread without stalling 1-5ms inside coarse Sleep(1).
+        SwitchToThread();
+        wait_high_res_100ns(1500);
+        return;
+    }
+    const int64_t intervals = static_cast<int64_t>(ns >= 100 ? ns / 100 : 1);
+    wait_high_res_100ns(intervals);
+#else
+    if (ns == 0) {
+        sched_yield();
+        return;
+    }
+    struct timespec req {};
+    req.tv_sec = static_cast<time_t>(ns / 1'000'000'000ULL);
+    req.tv_nsec = static_cast<long>(ns % 1'000'000'000ULL);
+    nanosleep(&req, nullptr);
+#endif
+}
+} // namespace lcs::cpu
 #include <filesystem>
 #include <mutex>
 #include <unordered_map>
@@ -108,7 +191,9 @@ bool HLEManager::initialize() {
         auto& hle = HLEManager::instance();
         if (swi < hle.handler_count()) {
             const auto& fn = hle.get_handler(swi);
-            if (fn) return fn(args);
+            if (fn) {
+                return fn(args);
+            }
         }
         return 0;
     });
@@ -363,6 +448,9 @@ void HLEManager::register_default_stubs() {
     register_function("malloc", [record_alloc](const uint64_t* args) -> uint64_t {
         size_t size = static_cast<size_t>(args[0]);
         void* ptr = std::malloc(size ? size : 1);
+        if (!ptr) {
+            std::cerr << "[HLE] FATAL: malloc(" << size << ") returned NULL!\n" << std::flush;
+        }
         record_alloc(ptr, ptr);
         return reinterpret_cast<uint64_t>(ptr);
     });
@@ -612,12 +700,12 @@ void HLEManager::register_default_stubs() {
         return str ? static_cast<uint64_t>(std::atoi(str)) : 0;
     });
 
-    register_function("atof", [](const uint64_t* args) -> uint64_t {
+    register_function("atof", [this](const uint64_t* args) -> uint64_t {
         const char* str = reinterpret_cast<const char*>(args[0]);
         double d = str ? std::atof(str) : 0.0;
-        uint64_t bits = 0;
-        std::memcpy(&bits, &d, sizeof(bits));
-        return bits;
+        auto* cpu = get_active_cpu();
+        if (cpu) cpu->set_fp_double(0, d);
+        return 0;
     });
 
     register_function("sscanf", [this](const uint64_t* args) -> uint64_t {
@@ -905,8 +993,14 @@ void HLEManager::register_default_stubs() {
     register_function("gettimeofday", [](const uint64_t* args) -> uint64_t {
         uint64_t* tv = reinterpret_cast<uint64_t*>(args[0]);
         if (tv) {
-            auto now = std::chrono::system_clock::now();
-            auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+            // Anchor wall epoch once and advance monotonically via steady_clock (QPC on Windows)
+            // so guest frame timers never jitter or jump backwards on system clock adjustments.
+            static const auto s_wall_anchor_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            static const auto s_steady_anchor = std::chrono::steady_clock::now();
+            const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - s_steady_anchor).count();
+            const int64_t micros = s_wall_anchor_us + elapsed_us;
             tv[0] = static_cast<uint64_t>(micros / 1000000); // seconds
             tv[1] = static_cast<uint64_t>(micros % 1000000); // microseconds
         }
@@ -914,18 +1008,8 @@ void HLEManager::register_default_stubs() {
     });
 
     register_function("usleep", [](const uint64_t* args) -> uint64_t {
-        uint64_t usec = args[0];
-#if defined(_WIN32)
-        if (usec >= 1000) {
-            Sleep(static_cast<DWORD>(usec / 1000));
-        } else if (usec > 0) {
-            Sleep(1);
-        } else {
-            Sleep(0);
-        }
-#else
-        usleep(usec);
-#endif
+        uint64_t usec = static_cast<uint32_t>(args[0]);
+        HLEManager::high_res_sleep_ns(usec * 1000ULL);
         return 0;
     });
 
@@ -961,7 +1045,10 @@ void HLEManager::register_default_stubs() {
         static const char* s_vendor = "Rockstar Games / LCS Recomp";
         static const char* s_renderer = "Direct3D 12 / Vulkan 1.4 Native Bridge";
         static const char* s_version = "OpenGL ES 3.2 (GTA LCS Recomp Native)";
-        static const char* s_extensions = "GL_OES_texture_float GL_OES_element_index_uint GL_EXT_texture_filter_anisotropic";
+        static const char* s_extensions =
+            "GL_OES_texture_float GL_OES_element_index_uint GL_EXT_texture_filter_anisotropic "
+            "GL_OES_compressed_ETC1_RGB8_texture GL_EXT_texture_compression_s3tc GL_IMG_texture_format_BGRA8888 "
+            "GL_IMG_texture_compression_pvrtc GL_OES_vertex_array_object";
 
         switch (name) {
             case 0x1f00: return reinterpret_cast<uint64_t>(s_vendor);
@@ -1021,10 +1108,10 @@ void HLEManager::register_default_stubs() {
         return 0x7f60404000ULL;
     });
     register_function("ANativeWindow_getWidth", [](const uint64_t*) -> uint64_t {
-        return lcs::graphics::RenderBridge::instance().get_surface_width();
+        return lcs::graphics::RenderBridge::instance().get_guest_width();
     });
     register_function("ANativeWindow_getHeight", [](const uint64_t*) -> uint64_t {
-        return lcs::graphics::RenderBridge::instance().get_surface_height();
+        return lcs::graphics::RenderBridge::instance().get_guest_height();
     });
     register_function("ANativeWindow_setBuffersGeometry", [](const uint64_t*) -> uint64_t {
         return 0;
@@ -1117,7 +1204,6 @@ void HLEManager::register_default_stubs() {
         }
 
         FILE* fp = std::fopen(spath.c_str(), clean_mode);
-        std::cout << "[HLE] fopen(\"" << path << "\" [mode: \"" << clean_mode << "\"]) -> " << fp << "\n";
         return reinterpret_cast<uint64_t>(fp);
     });
 
@@ -1172,6 +1258,95 @@ void HLEManager::register_default_stubs() {
         size_t count = args[2];
         FILE* fp = lcs::os::translate_guest_file_ptr(args[3]);
         return (ptr && fp) ? std::fread(ptr, size, count, fp) : 0;
+    });
+
+    register_function("__fread_chk", [](const uint64_t* args) -> uint64_t {
+        void* ptr = reinterpret_cast<void*>(args[0]);
+        size_t size = args[1];
+        size_t count = args[2];
+        FILE* fp = lcs::os::translate_guest_file_ptr(args[3]);
+        return (ptr && fp) ? std::fread(ptr, size, count, fp) : 0;
+    });
+
+    register_function("rewind", [](const uint64_t* args) -> uint64_t {
+        FILE* fp = lcs::os::translate_guest_file_ptr(args[0]);
+        if (fp) std::rewind(fp);
+        return 0;
+    });
+
+    register_function("ferror", [](const uint64_t* args) -> uint64_t {
+        FILE* fp = lcs::os::translate_guest_file_ptr(args[0]);
+        return fp ? static_cast<uint64_t>(std::ferror(fp)) : 1;
+    });
+
+    register_function("remove", [](const uint64_t* args) -> uint64_t {
+        const char* p = reinterpret_cast<const char*>(args[0]);
+        return p ? static_cast<uint64_t>(std::remove(p)) : static_cast<uint64_t>(-1);
+    });
+
+    register_function("rename", [](const uint64_t* args) -> uint64_t {
+        const char* oldp = reinterpret_cast<const char*>(args[0]);
+        const char* newp = reinterpret_cast<const char*>(args[1]);
+        return (oldp && newp) ? static_cast<uint64_t>(std::rename(oldp, newp)) : static_cast<uint64_t>(-1);
+    });
+
+    // Android AAssetManager / AAsset mapped to gtalcs/gamefiles/assets/
+    struct HostAsset {
+        FILE* fp = nullptr;
+        int64_t size = 0;
+        int64_t pos = 0;
+    };
+    register_function("AAssetManager_fromJava", [](const uint64_t*) -> uint64_t {
+        return 0x7f60405000ULL;
+    });
+    register_function("AAssetManager_open", [](const uint64_t* args) -> uint64_t {
+        const char* fname = reinterpret_cast<const char*>(args[1]);
+        if (!fname) return 0;
+        std::filesystem::path p1 = std::filesystem::path("gtalcs/gamefiles/assets") / fname;
+        std::filesystem::path p2 = std::filesystem::path(fname);
+        FILE* fp = nullptr;
+        if (std::filesystem::exists(p1)) fp = std::fopen(p1.string().c_str(), "rb");
+        else if (std::filesystem::exists(p2)) fp = std::fopen(p2.string().c_str(), "rb");
+        if (!fp) return 0;
+        std::fseek(fp, 0, SEEK_END);
+        int64_t sz = static_cast<int64_t>(std::ftell(fp));
+        std::fseek(fp, 0, SEEK_SET);
+        auto* a = new HostAsset{fp, sz > 0 ? sz : 0, 0};
+        return reinterpret_cast<uint64_t>(a);
+    });
+    register_function("AAsset_close", [](const uint64_t* args) -> uint64_t {
+        auto* a = reinterpret_cast<HostAsset*>(args[0]);
+        if (a) {
+            if (a->fp) std::fclose(a->fp);
+            delete a;
+        }
+        return 0;
+    });
+    register_function("AAsset_getLength", [](const uint64_t* args) -> uint64_t {
+        auto* a = reinterpret_cast<HostAsset*>(args[0]);
+        return a ? static_cast<uint64_t>(a->size) : 0;
+    });
+    register_function("AAsset_getRemainingLength", [](const uint64_t* args) -> uint64_t {
+        auto* a = reinterpret_cast<HostAsset*>(args[0]);
+        return a ? static_cast<uint64_t>(std::max<int64_t>(0, a->size - a->pos)) : 0;
+    });
+    register_function("AAsset_read", [](const uint64_t* args) -> uint64_t {
+        auto* a = reinterpret_cast<HostAsset*>(args[0]);
+        void* buf = reinterpret_cast<void*>(args[1]);
+        size_t count = static_cast<size_t>(args[2]);
+        if (!a || !a->fp || !buf) return static_cast<uint64_t>(-1);
+        size_t n = std::fread(buf, 1, count, a->fp);
+        a->pos += static_cast<int64_t>(n);
+        return static_cast<uint64_t>(n);
+    });
+    register_function("AAsset_seek", [](const uint64_t* args) -> uint64_t {
+        auto* a = reinterpret_cast<HostAsset*>(args[0]);
+        int64_t off = static_cast<int64_t>(args[1]);
+        int whence = static_cast<int>(args[2]);
+        if (!a || !a->fp) return static_cast<uint64_t>(-1);
+        if (std::fseek(a->fp, static_cast<long>(off), whence) != 0) return static_cast<uint64_t>(-1);
+        a->pos = static_cast<int64_t>(std::ftell(a->fp));
+        return static_cast<uint64_t>(a->pos);
     });
 
     register_function("fwrite", [](const uint64_t* args) -> uint64_t {
@@ -1368,16 +1543,16 @@ void HLEManager::register_default_stubs() {
         return 0;
     });
 
-    static uint32_t s_next_fbo_id = 1;
     register_function("glGenFramebuffers", [](const uint64_t* args) -> uint64_t {
-        int32_t n = static_cast<int32_t>(args[0]);
-        uint32_t* fbos = reinterpret_cast<uint32_t*>(args[1]);
-        if (fbos && n > 0) {
-            for (int32_t i = 0; i < n; i++) fbos[i] = s_next_fbo_id++;
-        }
+        lcs::graphics::RenderBridge::instance().gl_gen_framebuffers(
+            static_cast<int32_t>(args[0]), reinterpret_cast<uint32_t*>(args[1]));
         return 0;
     });
-    register_function("glDeleteFramebuffers", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glDeleteFramebuffers", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_delete_framebuffers(
+            static_cast<int32_t>(args[0]), reinterpret_cast<const uint32_t*>(args[1]));
+        return 0;
+    });
 
     static uint32_t s_next_rbo_id = 1;
     register_function("glGenRenderbuffers", [](const uint64_t* args) -> uint64_t {
@@ -1558,13 +1733,64 @@ void HLEManager::register_default_stubs() {
         return 0;
     });
     register_function("glBindRenderbuffer", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glFramebufferTexture2D", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glFramebufferTexture2D", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_framebuffer_texture_2d(
+            static_cast<uint32_t>(args[0]),
+            static_cast<uint32_t>(args[1]),
+            static_cast<uint32_t>(args[2]),
+            static_cast<uint32_t>(args[3]),
+            static_cast<int32_t>(args[4]));
+        return 0;
+    });
     register_function("glRenderbufferStorage", [](const uint64_t*) -> uint64_t { return 0; });
     register_function("glFramebufferRenderbuffer", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glTexParameteri", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glTexParameterf", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glTexParameteri", [](const uint64_t* args) -> uint64_t {
+        uint32_t target = static_cast<uint32_t>(args[0]);
+        uint32_t pname = static_cast<uint32_t>(args[1]);
+        int32_t param = static_cast<int32_t>(args[2]);
+        lcs::graphics::RenderBridge::instance().gl_tex_parameteri(target, pname, param);
+        return 0;
+    });
+    register_function("glTexParameterf", [this](const uint64_t* args) -> uint64_t {
+        uint32_t target = static_cast<uint32_t>(args[0]);
+        uint32_t pname = static_cast<uint32_t>(args[1]);
+        float param = 0.0f;
+        auto* cpu = get_active_cpu();
+        if (cpu) {
+            param = cpu->get_fp_float(0);
+        }
+        lcs::graphics::RenderBridge::instance().gl_tex_parameterf(target, pname, param);
+        return 0;
+    });
     register_function("glPixelStorei", [](const uint64_t*) -> uint64_t { return 0; });
-    register_function("glBindVertexArrayOES", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glGenVertexArraysOES", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_gen_vertex_arrays(
+            static_cast<int32_t>(args[0]), reinterpret_cast<uint32_t*>(args[1]));
+        return 0;
+    });
+    register_function("glDeleteVertexArraysOES", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_delete_vertex_arrays(
+            static_cast<int32_t>(args[0]), reinterpret_cast<const uint32_t*>(args[1]));
+        return 0;
+    });
+    register_function("glBindVertexArrayOES", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_bind_vertex_array(static_cast<uint32_t>(args[0]));
+        return 0;
+    });
+    register_function("glGenVertexArrays", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_gen_vertex_arrays(
+            static_cast<int32_t>(args[0]), reinterpret_cast<uint32_t*>(args[1]));
+        return 0;
+    });
+    register_function("glDeleteVertexArrays", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_delete_vertex_arrays(
+            static_cast<int32_t>(args[0]), reinterpret_cast<const uint32_t*>(args[1]));
+        return 0;
+    });
+    register_function("glBindVertexArray", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_bind_vertex_array(static_cast<uint32_t>(args[0]));
+        return 0;
+    });
     register_function("glTexImage2D", [this](const uint64_t* args) -> uint64_t {
         auto* cpu = get_active_cpu();
         const void* pixels = nullptr;
@@ -1844,13 +2070,89 @@ void HLEManager::register_default_stubs() {
             static_cast<uint32_t>(args[0]), reinterpret_cast<uint8_t*>(args[1]));
         return 0;
     });
-    register_function("glFlush", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glFlush", [](const uint64_t*) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_flush();
+        return 0;
+    });
     register_function("glFinish", [](const uint64_t*) -> uint64_t { return 0; });
     register_function("glGetError", [](const uint64_t*) -> uint64_t { return 0; });
     register_function("glActiveTexture", [](const uint64_t* args) -> uint64_t {
         lcs::graphics::RenderBridge::instance().gl_active_texture(static_cast<uint32_t>(args[0]));
         return 0;
     });
+    register_function("glCompressedTexImage2D", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_compressed_tex_image_2d(
+            static_cast<uint32_t>(args[0]), static_cast<int32_t>(args[1]),
+            static_cast<uint32_t>(args[2]), static_cast<int32_t>(args[3]),
+            static_cast<int32_t>(args[4]), static_cast<int32_t>(args[5]),
+            static_cast<int32_t>(args[6]), reinterpret_cast<const void*>(args[7]));
+        return 0;
+    });
+    register_function("glCompressedTexSubImage2D", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glCopyTexImage2D", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glCopyTexSubImage2D", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glReadPixels", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glDepthRangef", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glPolygonOffset", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glStencilFunc", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_stencil_func(
+            static_cast<uint32_t>(args[0]),
+            static_cast<int32_t>(args[1]),
+            static_cast<uint32_t>(args[2]));
+        return 0;
+    });
+    register_function("glStencilFuncSeparate", [](const uint64_t* args) -> uint64_t {
+        uint32_t face = static_cast<uint32_t>(args[0]);
+        if (face == 0x0404 || face == 0x0408) {
+            lcs::graphics::RenderBridge::instance().gl_stencil_func(
+                static_cast<uint32_t>(args[1]),
+                static_cast<int32_t>(args[2]),
+                static_cast<uint32_t>(args[3]));
+        }
+        return 0;
+    });
+    register_function("glStencilMask", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_stencil_mask(static_cast<uint32_t>(args[0]));
+        return 0;
+    });
+    register_function("glStencilMaskSeparate", [](const uint64_t* args) -> uint64_t {
+        uint32_t face = static_cast<uint32_t>(args[0]);
+        if (face == 0x0404 || face == 0x0408) {
+            lcs::graphics::RenderBridge::instance().gl_stencil_mask(static_cast<uint32_t>(args[1]));
+        }
+        return 0;
+    });
+    register_function("glStencilOp", [](const uint64_t* args) -> uint64_t {
+        lcs::graphics::RenderBridge::instance().gl_stencil_op(
+            static_cast<uint32_t>(args[0]),
+            static_cast<uint32_t>(args[1]),
+            static_cast<uint32_t>(args[2]));
+        return 0;
+    });
+    register_function("glStencilOpSeparate", [](const uint64_t* args) -> uint64_t {
+        uint32_t face = static_cast<uint32_t>(args[0]);
+        if (face == 0x0404 || face == 0x0408) {
+            lcs::graphics::RenderBridge::instance().gl_stencil_op(
+                static_cast<uint32_t>(args[1]),
+                static_cast<uint32_t>(args[2]),
+                static_cast<uint32_t>(args[3]));
+        }
+        return 0;
+    });
+    register_function("glGenerateMipmap", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glBlendColor", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glLineWidth", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glHint", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glSampleCoverage", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glReleaseShaderCompiler", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glValidateProgram", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glDetachShader", [](const uint64_t*) -> uint64_t { return 0; });
+    register_function("glIsBuffer", [](const uint64_t* args) -> uint64_t { return args[0] != 0 ? 1 : 0; });
+    register_function("glIsTexture", [](const uint64_t* args) -> uint64_t { return args[0] != 0 ? 1 : 0; });
+    register_function("glIsShader", [](const uint64_t* args) -> uint64_t { return args[0] != 0 ? 1 : 0; });
+    register_function("glIsFramebuffer", [](const uint64_t* args) -> uint64_t { return args[0] != 0 ? 1 : 0; });
+    register_function("glIsRenderbuffer", [](const uint64_t* args) -> uint64_t { return args[0] != 0 ? 1 : 0; });
+    register_function("glIsEnabled", [](const uint64_t*) -> uint64_t { return 0; });
 
     // Timing & System
     register_function("clock_gettime", [](const uint64_t* args) -> uint64_t {
@@ -1913,6 +2215,38 @@ void HLEManager::register_default_stubs() {
     register_function("tan", [this](const uint64_t*) -> uint64_t {
         auto* cpu = get_active_cpu();
         if (cpu) cpu->set_fp_double(0, std::tan(cpu->get_fp_double(0)));
+        return 0;
+    });
+    register_function("exp", [this](const uint64_t*) -> uint64_t {
+        auto* cpu = get_active_cpu();
+        if (cpu) cpu->set_fp_double(0, std::exp(cpu->get_fp_double(0)));
+        return 0;
+    });
+    register_function("exp2", [this](const uint64_t*) -> uint64_t {
+        auto* cpu = get_active_cpu();
+        if (cpu) cpu->set_fp_double(0, std::exp2(cpu->get_fp_double(0)));
+        return 0;
+    });
+    register_function("log", [this](const uint64_t*) -> uint64_t {
+        auto* cpu = get_active_cpu();
+        if (cpu) cpu->set_fp_double(0, std::log(cpu->get_fp_double(0)));
+        return 0;
+    });
+    register_function("log2", [this](const uint64_t*) -> uint64_t {
+        auto* cpu = get_active_cpu();
+        if (cpu) cpu->set_fp_double(0, std::log2(cpu->get_fp_double(0)));
+        return 0;
+    });
+    register_function("log2f", [this](const uint64_t*) -> uint64_t {
+        auto* cpu = get_active_cpu();
+        if (cpu) cpu->set_fp_float(0, std::log2(cpu->get_fp_float(0)));
+        return 0;
+    });
+    register_function("rand", [](const uint64_t*) -> uint64_t {
+        return static_cast<uint64_t>(std::rand());
+    });
+    register_function("srand", [](const uint64_t* args) -> uint64_t {
+        std::srand(static_cast<unsigned int>(args[0]));
         return 0;
     });
 

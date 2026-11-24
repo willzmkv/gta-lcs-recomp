@@ -1,0 +1,375 @@
+#include "game/lcs_physics_timing.h"
+
+#include "cpu/dynarmic_core.h"
+#include "cpu/elf_loader.h"
+#include "cpu/callbacks.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+
+#if defined(LCS_PLATFORM_WINDOWS)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
+namespace lcs::game {
+namespace {
+
+constexpr float kPs2TimeStep = 50.0f / 30.0f; // 1.66667 in RW 1/50s time-step units
+
+constexpr uint64_t kGotTimeStepRva        = 0x7f91e8ULL; // CTimer::ms_fTimeStep*
+constexpr uint64_t kGotHandlingMgrPtrRva  = 0x7f9340ULL; // pmod_HandlingManager (CHandlingDataMgr**)
+constexpr uint64_t kGotApplyTurnForceRva  = 0x803140ULL; // CPhysical::ApplyTurnForce(float...)
+constexpr uint64_t kGotProcessWheelRva    = 0x807328ULL; // CVehicle::ProcessWheel
+constexpr uint64_t kGotProcessBikeWheelRva= 0x807380ULL; // CVehicle::ProcessBikeWheel
+
+// Return addresses (RVA) of per-frame ApplyTurnForce calls lacking CTimer::ms_fTimeStep scaling:
+constexpr uint64_t kRaBikeWobble   = 0x4deab8ULL; // CBike::ProcessControl brake wobble (0.007*sin*turnMass)
+
+// Exact locked-brake instructions where unclamped s1 = -fwd_speed / step overwrote longitudinal impulse:
+constexpr uint64_t kWheelLockPatchRva = 0x4f770cULL;
+constexpr uint64_t kWheelLockRetRva   = 0x4f7750ULL;
+constexpr uint64_t kBikeLockPatchRva  = 0x4f7db8ULL;
+constexpr uint64_t kBikeLockRetRva    = 0x4f7dfcULL;
+
+inline uint32_t ldr_x_rel(uint8_t rt, size_t cur_off, size_t lit_off) {
+    const int32_t imm = static_cast<int32_t>(lit_off - cur_off) >> 2;
+    return 0x58000000u | ((static_cast<uint32_t>(imm) & 0x7ffffu) << 5) | (rt & 0x1fu);
+}
+
+void patch_bytes(lcs::cpu::DynarmicCore& cpu, uint64_t guest_va, const void* src, size_t sz) {
+#if defined(LCS_PLATFORM_WINDOWS)
+    DWORD old_prot = 0;
+    auto* dst = reinterpret_cast<void*>(guest_va);
+    VirtualProtect(dst, sz, PAGE_EXECUTE_READWRITE, &old_prot);
+    std::memcpy(dst, src, sz);
+    VirtualProtect(dst, sz, old_prot, &old_prot);
+#else
+    std::memcpy(reinterpret_cast<void*>(guest_va), src, sz);
+#endif
+    cpu.invalidate_cache(guest_va, sz);
+}
+
+uint64_t patch_got(lcs::cpu::DynarmicCore& cpu, uint64_t load_bias, uint64_t got_rva, uint64_t new_target,
+                   const lcs::cpu::ElfImage& image, const char* sym) {
+    const uint64_t slot_va = load_bias + got_rva;
+    uint64_t orig = *reinterpret_cast<const uint64_t*>(slot_va);
+    if (!orig && sym) orig = image.find_symbol(sym);
+    patch_bytes(cpu, slot_va, &new_target, sizeof(uint64_t));
+    return orig;
+}
+
+float compute_frame_scale(uint64_t timestep_ptr_va) {
+    if (!timestep_ptr_va) return 1.0f;
+    const auto* ts_ptr = reinterpret_cast<const float* const*>(timestep_ptr_va);
+    if (!ts_ptr || !*ts_ptr) return 1.0f;
+    const float step = **ts_ptr;
+    if (step > 0.0f && step < kPs2TimeStep) {
+        return std::clamp(step / kPs2TimeStep, 0.02f, 1.0f);
+    }
+    return 1.0f;
+}
+
+} // namespace
+
+void install_physics_timing_hooks(const lcs::cpu::ElfImage& image_game, lcs::cpu::DynarmicCore& cpu) {
+    static const bool s_enabled = [] {
+        const char* env = std::getenv("LCS_PHYSICS_TIMESTEP");
+        return !(env && env[0] == '0');
+    }();
+    if (!s_enabled) {
+        std::cout << "  [PhysicsTiming] Disabled via LCS_PHYSICS_TIMESTEP=0.\n";
+        return;
+    }
+
+#if defined(LCS_PLATFORM_WINDOWS)
+    void* page = VirtualAlloc(nullptr, 0x2000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    if (!page) {
+        std::cerr << "  [WARN] Failed to allocate physics timing RWX hook page.\n";
+        return;
+    }
+    auto* base = reinterpret_cast<uint8_t*>(page);
+    std::memset(base, 0, 0x2000);
+    const uint64_t base_addr = reinterpret_cast<uint64_t>(base);
+    size_t cursor = 0;
+
+    const uint64_t load_bias = image_game.get_load_bias();
+    const uint64_t ts_ptr_va = load_bias + kGotTimeStepRva;
+    const uint64_t handling_ptr_va = load_bias + kGotHandlingMgrPtrRva;
+
+    auto& hle = lcs::cpu::HLEManager::instance();
+
+    // Scratch state for rolling resistance save/restore across ProcessWheel / ProcessBikeWheel
+    struct RollResState {
+        float saved_val;
+        uint32_t active;
+        float steer_lim_car;
+        float straight_lim_car;
+        float handbrake_lim_car;
+        float steer_thresh;
+        float bike_lim;
+    };
+    const uint64_t phys_state_va = base_addr + 0x1e00ULL;
+    auto* phys_state = reinterpret_cast<RollResState*>(base + 0x1e00ULL);
+    phys_state->saved_val = 0.0f;
+    phys_state->active = 0;
+    phys_state->steer_lim_car = 0.80f;     // Front & Square footbraking cornering cap (78% lateral steering retained!)
+    phys_state->straight_lim_car = 1.00f;  // Straight-line max braking = 100% traction
+    phys_state->handbrake_lim_car = 1.28f; // Rear R1 handbrake drift allows breaking traction smoothly
+    phys_state->steer_thresh = 0.005f;
+    phys_state->bike_lim = 0.82f;          // Motorcycle wheel brake lock cap (prevents rear spinout/endo flip)
+
+    // 1. ApplyTurnForce(this [x0], fx [s0], fy [s1], fz [s2], px [s3], py [s4], pz [s5])
+    {
+        const uint64_t cb_va = hle.register_function("__phys_turn_scale",
+            [load_bias, ts_ptr_va](const uint64_t* args) -> uint64_t {
+                const uint64_t ra = args[0] - load_bias;
+                float scale = 1.0f;
+                // Only scale per-frame brake speed wobble (matching VCS Recomp);
+                // keep Lean1/2 and Steer1/2 unscaled so bikes retain full upright & steering authority.
+                if (ra == kRaBikeWobble) {
+                    scale = compute_frame_scale(ts_ptr_va);
+                }
+                uint32_t bits = 0;
+                std::memcpy(&bits, &scale, 4);
+                return bits;
+            });
+
+        const uint64_t stub_va = base_addr + cursor;
+        auto* code = reinterpret_cast<uint32_t*>(base + cursor);
+        const uint64_t orig_atf = patch_got(
+            cpu, load_bias, kGotApplyTurnForceRva, stub_va, image_game, "_ZN9CPhysical14ApplyTurnForceEffffff");
+
+        // Save x0, x30 and d0..d5 across HLE call, scale s0..s2 by returned float bits in w0, tail-branch to orig.
+        const uint32_t words[24] = {
+            0xd10143ffu, // 0x00: sub sp, sp, #0x50
+            0xa9007be0u, // 0x04: stp x0, x30, [sp, #0x00]
+            0x6d0107e0u, // 0x08: stp d0, d1, [sp, #0x10]
+            0x6d020fe2u, // 0x0c: stp d2, d3, [sp, #0x20]
+            0x6d0317e4u, // 0x10: stp d4, d5, [sp, #0x30]
+            0xaa1e03e0u, // 0x14: mov x0, x30
+            ldr_x_rel(16, 0x18, 0x68),
+            0xd63f0200u, // 0x1c: blr x16 (__phys_turn_scale)
+            0x1e270010u, // 0x20: fmov s16, w0 (caller-saved; never clobber callee-saved d8/s8 used by CBike!)
+            0xa9407be0u, // 0x24: ldp x0, x30, [sp, #0x00]
+            0x6d4107e0u, // 0x28: ldp d0, d1, [sp, #0x10]
+            0x6d420fe2u, // 0x2c: ldp d2, d3, [sp, #0x20]
+            0x6d4317e4u, // 0x30: ldp d4, d5, [sp, #0x30]
+            0x910143ffu, // 0x34: add sp, sp, #0x50
+            0x1e300800u, // 0x38: fmul s0, s0, s16
+            0x1e300821u, // 0x3c: fmul s1, s1, s16
+            0x1e300842u, // 0x40: fmul s2, s2, s16
+            ldr_x_rel(16, 0x44, 0x60),
+            0xd61f0200u, // 0x48: br x16 (orig_ApplyTurnForce)
+            0xd503201fu, // 0x4c: nop
+            0xd503201fu, // 0x50: nop
+            0xd503201fu, // 0x54: nop
+            0xd503201fu, // 0x58: nop
+            0xd503201fu, // 0x5c: nop
+        };
+        std::memcpy(code, words, sizeof(words));
+        auto* lits = reinterpret_cast<uint64_t*>(code + 24);
+        lits[0] = orig_atf;
+        lits[1] = cb_va;
+        cursor += sizeof(words) + 16;
+        cursor = (cursor + 15) & ~size_t(15);
+    }
+
+    // 2. Rolling resistance scaling wrapper for ProcessWheel (GOT 0x807328) & ProcessBikeWheel (GOT 0x807380)
+    //    No instruction inside either function accesses GOT 0x7f9340 except rolling resistance ([*pmod_HandlingMgr + 4]).
+    auto install_roll_wrapper = [&](uint64_t got_rva, const char* sym, const char* name_pre, const char* name_post) {
+        const uint64_t pre_va = hle.register_function(name_pre,
+            [ts_ptr_va, handling_ptr_va, phys_state](const uint64_t*) -> uint64_t {
+                phys_state->active = 0;
+                const float scale = compute_frame_scale(ts_ptr_va);
+                if (scale < 0.999f) {
+                    // GOT[0x7f9340] points to pmod_HandlingManager (float**), whose pointee +4 is fRollingResistance.
+                    auto* const* p_mgr_ptr = reinterpret_cast<float* const* const*>(handling_ptr_va);
+                    float* const* mgr_ptr = p_mgr_ptr ? *p_mgr_ptr : nullptr;
+                    float* mgr_obj = (mgr_ptr && *mgr_ptr) ? *mgr_ptr : nullptr;
+                    if (mgr_obj) {
+                        phys_state->saved_val = mgr_obj[1];
+                        mgr_obj[1] = phys_state->saved_val * scale;
+                        phys_state->active = 1;
+                    }
+                }
+                return 0;
+            });
+        const uint64_t post_va = hle.register_function(name_post,
+            [handling_ptr_va, phys_state](const uint64_t*) -> uint64_t {
+                if (phys_state->active) {
+                    auto* const* p_mgr_ptr = reinterpret_cast<float* const* const*>(handling_ptr_va);
+                    float* const* mgr_ptr = p_mgr_ptr ? *p_mgr_ptr : nullptr;
+                    float* mgr_obj = (mgr_ptr && *mgr_ptr) ? *mgr_ptr : nullptr;
+                    if (mgr_obj) {
+                        mgr_obj[1] = phys_state->saved_val;
+                    }
+                    phys_state->active = 0;
+                }
+                return 0;
+            });
+
+        const uint64_t stub_va = base_addr + cursor;
+        auto* code = reinterpret_cast<uint32_t*>(base + cursor);
+        const uint64_t orig_fn = patch_got(cpu, load_bias, got_rva, stub_va, image_game, sym);
+
+        // Clean frame layout: sub sp, sp, #0xd0 (stack args from caller sit at [sp+0xd0 .. sp+0xe8])
+        const uint32_t wrap_words[40] = {
+            0xd10343ffu, // 0x00: sub sp, sp, #0xd0
+            0xa9027bfdu, // 0x04: stp x29, x30, [sp, #0x20]
+            0xa90307e0u, // 0x08: stp x0, x1, [sp, #0x30]
+            0xa9040fe2u, // 0x0c: stp x2, x3, [sp, #0x40]
+            0xa90517e4u, // 0x10: stp x4, x5, [sp, #0x50]
+            0xa9061fe6u, // 0x14: stp x6, x7, [sp, #0x60]
+            0x6d0707e0u, // 0x18: stp d0, d1, [sp, #0x70]
+            0x6d080fe2u, // 0x1c: stp d2, d3, [sp, #0x80]
+            0x6d0917e4u, // 0x20: stp d4, d5, [sp, #0x90]
+            0x6d0a1fe6u, // 0x24: stp d6, d7, [sp, #0xa0]
+            0xa94d2feau, // 0x28: ldp x10, x11, [sp, #0xd0] (copy 32 bytes stack args to [sp, #0])
+            0xa94e37ecu, // 0x2c: ldp x12, x13, [sp, #0xe0]
+            0xa9002feau, // 0x30: stp x10, x11, [sp, #0x00]
+            0xa90137ecu, // 0x34: stp x12, x13, [sp, #0x10]
+            ldr_x_rel(16, 0x38, 0xa8), // pre_va
+            0xd63f0200u, // 0x3c: blr x16
+            0xa94307e0u, // 0x40: ldp x0, x1, [sp, #0x30]
+            0xa9440fe2u, // 0x44: ldp x2, x3, [sp, #0x40]
+            0xa94517e4u, // 0x48: ldp x4, x5, [sp, #0x50]
+            0xa9461fe6u, // 0x4c: ldp x6, x7, [sp, #0x60]
+            0x6d4707e0u, // 0x50: ldp d0, d1, [sp, #0x70]
+            0x6d480fe2u, // 0x54: ldp d2, d3, [sp, #0x80]
+            0x6d4917e4u, // 0x58: ldp d4, d5, [sp, #0x90]
+            0x6d4a1fe6u, // 0x5c: ldp d6, d7, [sp, #0xa0]
+            ldr_x_rel(16, 0x60, 0xa0), // orig_fn
+            0xd63f0200u, // 0x64: blr x16
+            ldr_x_rel(16, 0x68, 0xb0), // post_va
+            0xd63f0200u, // 0x6c: blr x16
+            0xa9427bfdu, // 0x70: ldp x29, x30, [sp, #0x20]
+            0x910343ffu, // 0x74: add sp, sp, #0xd0
+            0xd65f03c0u, // 0x78: ret
+            0xd503201fu, // 0x7c..0x9c padding
+            0xd503201fu, 0xd503201fu, 0xd503201fu, 0xd503201fu,
+            0xd503201fu, 0xd503201fu, 0xd503201fu, 0xd503201fu,
+        };
+        std::memcpy(code, wrap_words, sizeof(wrap_words));
+        auto* lits = reinterpret_cast<uint64_t*>(code + 40);
+        lits[0] = orig_fn;
+        lits[1] = pre_va;
+        lits[2] = post_va;
+        cursor += sizeof(wrap_words) + 24;
+        cursor = (cursor + 15) & ~size_t(15);
+    };
+
+    install_roll_wrapper(kGotProcessWheelRva,
+                         "_ZN8CVehicle12ProcessWheelER7CVectorS1_S1_S1_ifffcPfP11tWheelStatet",
+                         "__phys_car_wheel_pre", "__phys_car_wheel_post");
+    install_roll_wrapper(kGotProcessBikeWheelRva,
+                         "_ZN8CVehicle16ProcessBikeWheelER7CVectorS1_S1_S1_iffffcPfP11tWheelState17eBikeWheelSpecialt",
+                         "__phys_bike_wheel_pre", "__phys_bike_wheel_post");
+
+    // 3. Locked-wheel longitudinal brake clamp in CVehicle::ProcessWheel (0x4f770c):
+    //    Replaces unclamped `s16 = s1 (-fwd_speed / step)` with `clamp(s1, -lim, +lim)` so steering under Square
+    //    retains lateral grip while straight-line braking and R1 handbrake drift remain full strength.
+    {
+        const uint64_t patch_va = load_bias + kWheelLockPatchRva;
+        static constexpr uint32_t kExpected[4] = {0x1e204160u, 0x1e204030u, 0x52800068u, 0xb9000388u};
+        uint32_t actual[4]{};
+        std::memcpy(actual, reinterpret_cast<const void*>(patch_va), sizeof(actual));
+        if (std::memcmp(actual, kExpected, sizeof(kExpected)) == 0) {
+            const uint64_t stub_va = base_addr + cursor;
+            auto* code = reinterpret_cast<uint32_t*>(base + cursor);
+            // Re-checked branch offsets explicitly:
+            const uint32_t car_words[24] = {
+                0x1e204160u, // 0x00: fmov s0, s11
+                0x52800068u, // 0x04: mov w8, #3
+                0xb9000388u, // 0x08: str w8, [x28]
+                ldr_x_rel(9, 0x0c, 0x60), // 0x0c: ldr x9, =phys_state_va
+                0x394b3688u, // 0x10: ldrb w8, [x20, #0x2cd]
+                0x362800a8u, // 0x14: tbz w8, #5, +0x14 (0x28 not handbrake)
+                0x36000097u, // 0x18: tbz w23, #0, +0x10 (0x28 front wheel)
+                0xbd401123u, // 0x1c: ldr s3, [x9, #0x10] (handbrake_lim_car = 1.28f)
+                0x14000009u, // 0x20: b +0x24 (0x44)
+                0xd503201fu, // 0x24: nop
+                0xbd42c282u, // 0x28: ldr s2, [x20, #0x2c0] (m_fSteerAngle)
+                0x1e20c042u, // 0x2c: fabs s2, s2
+                0xbd401523u, // 0x30: ldr s3, [x9, #0x14] (steer_thresh = 0.005f)
+                0x1e232040u, // 0x34: fcmp s2, s3
+                0xbd400d22u, // 0x38: ldr s2, [x9, #0x0c] (straight = 1.00f)
+                0xbd400923u, // 0x3c: ldr s3, [x9, #0x08] (steer = 0.80f)
+                0x1e22cc63u, // 0x40: fcsel s3, s3, s2, gt
+                0x1e290863u, // 0x44: fmul s3, s3, s9 (cap = factor * s9)
+                0x1e235902u, // 0x48: fmin s2, s8, s3 (lim = min(s8, cap))
+                0x1e214043u, // 0x4c: fneg s3, s2
+                0x1e225830u, // 0x50: fmin s16, s1, s2
+                0x1e234a10u, // 0x54: fmax s16, s16, s3
+                ldr_x_rel(16, 0x58, 0x68),
+                0xd61f0200u, // 0x5c: br x16 -> kWheelLockRetRva
+            };
+            std::memcpy(code, car_words, sizeof(car_words));
+            auto* lits = reinterpret_cast<uint64_t*>(code + 24);
+            lits[0] = phys_state_va;
+            lits[1] = load_bias + kWheelLockRetRva;
+            cursor += sizeof(car_words) + 16;
+            cursor = (cursor + 15) & ~size_t(15);
+
+            struct { uint32_t ldr_x16, br_x16; uint64_t target; } detour{0x58000050u, 0xd61f0200u, stub_va};
+            patch_bytes(cpu, patch_va, &detour, sizeof(detour));
+        } else {
+            std::cerr << "  [WARN] ProcessWheel lock signature mismatch; car braking grip patch skipped.\n";
+        }
+    }
+
+    // 4. Locked-wheel longitudinal brake clamp in CVehicle::ProcessBikeWheel (0x4f7db8):
+    //    Replaces unclamped `s6 = s1 (-fwd_speed / step)` with `clamp(s1, -lim, +lim)` (`lim = min(s9, 0.82*s10)`).
+    {
+        const uint64_t patch_va = load_bias + kBikeLockPatchRva;
+        static constexpr uint32_t kExpected[4] = {0x1e204180u, 0x1e204026u, 0x52800068u, 0xb9000388u};
+        uint32_t actual[4]{};
+        std::memcpy(actual, reinterpret_cast<const void*>(patch_va), sizeof(actual));
+        if (std::memcmp(actual, kExpected, sizeof(kExpected)) == 0) {
+            const uint64_t stub_va = base_addr + cursor;
+            auto* code = reinterpret_cast<uint32_t*>(base + cursor);
+            // Inputs live: s1=-fwd_speed/step, s9=brake_imp, s10=grip_lim, s12=lat_imp, x28=&state.
+            // Scratch: x9, w8, s2, s3. Exits to kBikeLockRetRva with s0=s12, s6=clamped, [x28]=3.
+            const uint32_t bike_words[14] = {
+                0x1e204180u, // 0x00: fmov s0, s12
+                0x52800068u, // 0x04: mov w8, #3
+                0xb9000388u, // 0x08: str w8, [x28]
+                ldr_x_rel(9, 0x0c, 0x38), // 0x0c: ldr x9, =phys_state_va
+                0xbd401923u, // 0x10: ldr s3, [x9, #0x18] (bike_lim = 0.82f)
+                0x1e2a0863u, // 0x14: fmul s3, s3, s10 (cap = 0.82 * grip)
+                0x1e235922u, // 0x18: fmin s2, s9, s3  (lim = min(brake, cap))
+                0x1e214043u, // 0x1c: fneg s3, s2
+                0x1e225826u, // 0x20: fmin s6, s1, s2
+                0x1e2348c6u, // 0x24: fmax s6, s6, s3
+                ldr_x_rel(16, 0x28, 0x40),
+                0xd61f0200u, // 0x2c: br x16 -> kBikeLockRetRva
+                0xd503201fu, // 0x30: nop
+                0xd503201fu, // 0x34: nop
+            };
+            std::memcpy(code, bike_words, sizeof(bike_words));
+            auto* lits = reinterpret_cast<uint64_t*>(code + 14);
+            lits[0] = phys_state_va;
+            lits[1] = load_bias + kBikeLockRetRva;
+            cursor += sizeof(bike_words) + 16;
+            cursor = (cursor + 15) & ~size_t(15);
+
+            struct { uint32_t ldr_x16, br_x16; uint64_t target; } detour{0x58000050u, 0xd61f0200u, stub_va};
+            patch_bytes(cpu, patch_va, &detour, sizeof(detour));
+        } else {
+            std::cerr << "  [WARN] ProcessBikeWheel lock signature mismatch; bike braking grip patch skipped.\n";
+        }
+    }
+
+    cpu.invalidate_cache(base_addr, 0x2000);
+    std::cout << "  - Installed vehicle physics timing & braking lateral-grip hooks.\n";
+#else
+    (void)image_game; (void)cpu;
+#endif
+}
+
+} // namespace lcs::game

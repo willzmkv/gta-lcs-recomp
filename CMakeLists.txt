@@ -76,13 +76,48 @@ set(SOURCES
     # Input
     src/input/input_system.cpp
     src/input/mouse_aim.cpp
+    src/input/pc_controls.cpp
     src/input/gamepad.cpp
 
     # Graphics abstraction
     src/graphics/render_bridge.cpp
     src/graphics/window.cpp
     src/graphics/shader_compiler.cpp
+    src/graphics/video_player.cpp
+
+    # Game world enhancements, PS2 Effects Pipeline & Trainer
+    src/game/lcs_world_hd.cpp
+    src/game/lcs_batched_fast.cpp
+    src/game/lcs_distance.cpp
+    src/game/lcs_memory.cpp
+    src/game/lcs_ps2_effects.cpp
+    src/game/lcs_physics_timing.cpp
+    src/game/lcs_dialogue_speakers.cpp
+    src/game/lcs_subtitles.cpp
+    src/ui/ui_loc.cpp
+    src/game/lcs_free_aim.cpp
+    src/game/lcs_prompts.cpp
+    src/game/lcs_trainer.cpp
+
+    # Settings & Unified GTA 6-style Global In-Game Menu
+    src/settings/settings.cpp
+    src/ui/ui_theme.cpp
+    src/ui/global_menu.cpp
+    src/ui/imgui_overlay.cpp
+
+    # Dear ImGui core + backends
+    third_party/imgui/imgui.cpp
+    third_party/imgui/imgui_draw.cpp
+    third_party/imgui/imgui_tables.cpp
+    third_party/imgui/imgui_widgets.cpp
 )
+
+if(WIN32)
+    list(APPEND SOURCES
+        third_party/imgui/backends/imgui_impl_win32.cpp
+        third_party/imgui/backends/imgui_impl_dx12.cpp
+    )
+endif()
 
 # Renderers
 if(ENABLE_D3D12)
@@ -116,6 +151,8 @@ target_include_directories(lcs PRIVATE
     src/vfs
     src/input
     third_party
+    third_party/imgui
+    third_party/imgui/backends
 )
 
 # System libraries
@@ -128,6 +165,9 @@ if(WIN32)
         ole32
         uuid
         dxgi
+        mfplat
+        mfreadwrite
+        mfuuid
     )
     if(ENABLE_D3D12)
         target_link_libraries(lcs PRIVATE d3d12 d3dcompiler)

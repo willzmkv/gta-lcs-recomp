@@ -2,6 +2,8 @@
 
 Welcome to **gta-lcs-recomp**. This document defines the engineering conventions, architecture invariants, and tooling workflows for agents and developers working in this codebase.
 
+> **Start with [`docs/HANDOFF.md`](docs/HANDOFF.md)** (current state, isolation rules for this folder, open issues, next steps). The rest of the project documentation is indexed in [`README.md`](README.md).
+
 ---
 
 ## 1. Core Architecture Invariants

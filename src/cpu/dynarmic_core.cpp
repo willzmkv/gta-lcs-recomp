@@ -32,45 +32,10 @@ class CoreCallbacks : public Dynarmic::A64::UserCallbacks {
 public:
     CoreCallbacks(DynarmicCore::Impl* parent) : m_parent(parent) {}
 
-    std::uint64_t MemoryRead(Dynarmic::A64::VAddr vaddr, std::size_t size) override {
-        if (vaddr < 0x1000) {
-            std::cerr << "[CRASH GUARD] MemoryRead of " << size << " bytes from low vaddr 0x"
-                      << std::hex << vaddr << std::dec << "\n";
-            return 0;
-        }
-        std::uint64_t val = 0;
-        std::memcpy(&val, reinterpret_cast<const void*>(vaddr), size);
-        return val;
-    }
-
-    Dynarmic::A64::Vector MemoryRead128(Dynarmic::A64::VAddr vaddr) override {
-        if (vaddr < 0x1000) {
-            std::cerr << "[CRASH GUARD] MemoryRead128 from low vaddr 0x"
-                      << std::hex << vaddr << std::dec << "\n";
-            return Dynarmic::A64::Vector{};
-        }
-        Dynarmic::A64::Vector val{};
-        std::memcpy(val.data(), reinterpret_cast<const void*>(vaddr), 16);
-        return val;
-    }
-
-    void MemoryWrite(Dynarmic::A64::VAddr vaddr, std::uint64_t value, std::size_t size) override {
-        if (vaddr < 0x1000) {
-            std::cerr << "[CRASH GUARD] MemoryWrite of " << size << " bytes to low vaddr 0x"
-                      << std::hex << vaddr << " (val: 0x" << value << ")" << std::dec << "\n";
-            return;
-        }
-        std::memcpy(reinterpret_cast<void*>(vaddr), &value, size);
-    }
-
-    void MemoryWrite128(Dynarmic::A64::VAddr vaddr, Dynarmic::A64::Vector value) override {
-        if (vaddr < 0x1000) {
-            std::cerr << "[CRASH GUARD] MemoryWrite128 to low vaddr 0x"
-                      << std::hex << vaddr << std::dec << "\n";
-            return;
-        }
-        std::memcpy(reinterpret_cast<void*>(vaddr), value.data(), 16);
-    }
+    std::uint64_t MemoryRead(Dynarmic::A64::VAddr vaddr, std::size_t size) override;
+    Dynarmic::A64::Vector MemoryRead128(Dynarmic::A64::VAddr vaddr) override;
+    void MemoryWrite(Dynarmic::A64::VAddr vaddr, std::uint64_t value, std::size_t size) override;
+    void MemoryWrite128(Dynarmic::A64::VAddr vaddr, Dynarmic::A64::Vector value) override;
 
     bool MemoryWriteExclusive8(Dynarmic::A64::VAddr vaddr, std::uint8_t value, std::uint8_t expected) override {
         auto* ptr = reinterpret_cast<uint8_t*>(vaddr);
@@ -266,6 +231,64 @@ void CoreCallbacks::CallSVC(std::uint32_t swi) {
     m_parent->handle_svc(swi);
 }
 
+static void log_crash_guard(const char* op, std::size_t size, Dynarmic::A64::VAddr vaddr, DynarmicCore::Impl* impl) {
+    static std::atomic<int> s_guard_logs{0};
+    if (s_guard_logs.fetch_add(1, std::memory_order_relaxed) < 20) {
+        const uint64_t pc = (impl && impl->jit) ? impl->jit->GetPC() : 0;
+        const uint64_t lr = (impl && impl->jit) ? impl->jit->GetRegister(30) : 0;
+        const uint64_t sp = (impl && impl->jit) ? impl->jit->GetSP() : 0;
+        const uint64_t x0 = (impl && impl->jit) ? impl->jit->GetRegister(0) : 0;
+        const uint64_t x1 = (impl && impl->jit) ? impl->jit->GetRegister(1) : 0;
+        const uint64_t x16 = (impl && impl->jit) ? impl->jit->GetRegister(16) : 0;
+        const uint64_t x17 = (impl && impl->jit) ? impl->jit->GetRegister(17) : 0;
+        const uint64_t x19 = (impl && impl->jit) ? impl->jit->GetRegister(19) : 0;
+        const uint64_t x21 = (impl && impl->jit) ? impl->jit->GetRegister(21) : 0;
+        const uint64_t x29 = (impl && impl->jit) ? impl->jit->GetRegister(29) : 0;
+        std::cerr << "[CRASH GUARD] tid=" << GetCurrentThreadId()
+                  << " " << op << " of " << size << "B vaddr=0x"
+                  << std::hex << vaddr << " pc=0x" << pc << " lr=0x" << lr
+                  << " sp=0x" << sp << " x0=0x" << x0 << " x1=0x" << x1
+                  << " x16=0x" << x16 << " x17=0x" << x17 << " x19=0x" << x19
+                  << " x21=0x" << x21 << " x29=0x" << x29 << std::dec << "\n" << std::flush;
+    }
+}
+
+std::uint64_t CoreCallbacks::MemoryRead(Dynarmic::A64::VAddr vaddr, std::size_t size) {
+    if (vaddr < 0x1000) {
+        log_crash_guard("Read", size, vaddr, m_parent);
+        return 0;
+    }
+    std::uint64_t val = 0;
+    std::memcpy(&val, reinterpret_cast<const void*>(vaddr), size);
+    return val;
+}
+
+Dynarmic::A64::Vector CoreCallbacks::MemoryRead128(Dynarmic::A64::VAddr vaddr) {
+    if (vaddr < 0x1000) {
+        log_crash_guard("Read128", 16, vaddr, m_parent);
+        return Dynarmic::A64::Vector{};
+    }
+    Dynarmic::A64::Vector val{};
+    std::memcpy(val.data(), reinterpret_cast<const void*>(vaddr), 16);
+    return val;
+}
+
+void CoreCallbacks::MemoryWrite(Dynarmic::A64::VAddr vaddr, std::uint64_t value, std::size_t size) {
+    if (vaddr < 0x1000) {
+        log_crash_guard("Write", size, vaddr, m_parent);
+        return;
+    }
+    std::memcpy(reinterpret_cast<void*>(vaddr), &value, size);
+}
+
+void CoreCallbacks::MemoryWrite128(Dynarmic::A64::VAddr vaddr, Dynarmic::A64::Vector value) {
+    if (vaddr < 0x1000) {
+        log_crash_guard("Write128", 16, vaddr, m_parent);
+        return;
+    }
+    std::memcpy(reinterpret_cast<void*>(vaddr), value.data(), 16);
+}
+
 void CoreCallbacks::ExceptionRaised(Dynarmic::A64::VAddr pc, Dynarmic::A64::Exception exception) {
     std::cerr << "[CPU Exception] PC: 0x" << std::hex << pc
               << ", Exception ID: " << static_cast<int>(exception) << std::dec << "\n";
@@ -310,6 +333,15 @@ static bool finish_jit_setup(DynarmicCore::Impl& impl) {
     impl.config.callbacks = &impl.callbacks;
     impl.config.tpidr_el0 = &impl.tpidr_el0;
     impl.config.tpidrro_el0 = &impl.tpidrro_el0;
+
+    // Host/guest memory is 1:1 identity mapped: direct [r13 + vaddr] fastmem with r13 = 0.
+    // Unmapped accesses fall back cleanly through Dynarmic's SEH (RtlAddFunctionTable) handler.
+    impl.config.fastmem_pointer = std::uintptr_t{0};
+    impl.config.fastmem_address_space_bits = 64;
+    impl.config.silently_mirror_fastmem = false;
+    impl.config.fastmem_exclusive_access = true;
+    impl.config.enable_cycle_counting = false;
+    impl.config.wall_clock_cntpct = true;
 
     impl.jit = std::make_unique<Dynarmic::A64::Jit>(impl.config);
     return impl.jit != nullptr;
@@ -454,6 +486,10 @@ uint64_t DynarmicCore::call_nested(uint64_t address, const std::vector<uint64_t>
     for (size_t i = 0; i < 31; i++) {
         saved_regs[i] = m_impl->jit->GetRegister(i);
     }
+    const auto saved_vecs = m_impl->jit->GetVectors();
+    const uint32_t saved_pstate = m_impl->jit->GetPstate();
+    const uint32_t saved_fpcr = m_impl->jit->GetFpcr();
+    const uint32_t saved_fpsr = m_impl->jit->GetFpsr();
     uint64_t saved_sp = m_impl->jit->GetSP();
     uint64_t saved_pc = m_impl->jit->GetPC();
     bool saved_call_returned = m_impl->call_returned;
@@ -477,6 +513,10 @@ uint64_t DynarmicCore::call_nested(uint64_t address, const std::vector<uint64_t>
     for (size_t i = 0; i < 31; i++) {
         m_impl->jit->SetRegister(i, saved_regs[i]);
     }
+    m_impl->jit->SetVectors(saved_vecs);
+    m_impl->jit->SetPstate(saved_pstate);
+    m_impl->jit->SetFpcr(saved_fpcr);
+    m_impl->jit->SetFpsr(saved_fpsr);
     m_impl->jit->SetSP(saved_sp);
     m_impl->jit->SetPC(saved_pc);
     m_impl->call_returned = saved_call_returned;
@@ -486,6 +526,14 @@ uint64_t DynarmicCore::call_nested(uint64_t address, const std::vector<uint64_t>
 
 void DynarmicCore::register_svc_handler(uint32_t swi, SVCHandler handler) {
     m_impl->svc_handlers[swi] = std::move(handler);
+}
+
+bool DynarmicCore::read_guest_memory(uint64_t vaddr, void* out, size_t size) {
+    if (vaddr < 0x1000) {
+        return false;
+    }
+    std::memcpy(out, reinterpret_cast<const void*>(vaddr), size);
+    return true;
 }
 
 } // namespace lcs::cpu

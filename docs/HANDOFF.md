@@ -1,0 +1,136 @@
+# Handoff — estado do projeto em 2026-11-24
+
+Leia este arquivo antes de qualquer outra coisa. Ele registra onde o trabalho parou,
+o que está compilado agora, o que está aberto e a ordem recomendada para continuar.
+
+Documentos relacionados:
+
+- [ARQUITETURA.md](ARQUITETURA.md) — como o executável funciona (ELF + Dynarmic + HLE + D3D12).
+- [HD_WORLD.md](HD_WORLD.md) — streaming de células HD, distâncias, população.
+- [PERFORMANCE.md](PERFORMANCE.md) — medições, gargalos e plano de paralelismo.
+- [DIAGNOSTICO.md](DIAGNOSTICO.md) — variáveis `LCS_DIAG_*`, rig de cruzeiro, instrumentação temporária.
+- [CONFIGURACAO.md](CONFIGURACAO.md) — chaves do `lcs.ini`.
+
+---
+
+## 1. Regras de isolamento (obrigatórias)
+
+- Trabalhe **somente** em `D:\Games\LibertyStories-launcher`.
+- **Não altere** `D:\Games\LibertyStories`, `D:\Games\LibertyStories-ipad-test` nem
+  `D:\Games\LibertyStories-ps2-fx`.
+- `assets\`, `gtalcs\` e `modloader\` dentro desta pasta são **junctions NTFS** para
+  `D:\Games\LibertyStories\...`. Trate como somente leitura: não apague nem sobrescreva
+  saves (`gtalcs\userdata\`), `gtalcs\lcs.conf`, `controls.ini` ou arquivos do jogo.
+- `GTALcs_1.14_LeTi.ipa` na raiz é um **hard link** para o arquivo em `D:\Games\LibertyStories`.
+  Apagar/editar aqui afeta o original.
+- Não compile enquanto `lcs.exe` estiver rodando. Não mate `LCSLauncher.exe` do usuário.
+- Nunca faça commit de assets ou binários do jogo (ver `AGENTS.md`).
+- Projetos de referência (somente leitura): `D:\Games\vcs-hd-world-impl` (documentação do
+  VCS Recomp, em especial `docs/PERFORMANCE.md` e `docs/PARALELISMO_CPU_GPU.md`),
+  `D:\Games\vcs-agent`, `D:\Games\vcs-agent-build`, e o repositório
+  <https://github.com/willzmkv/gta-vcs-recomp>.
+
+> **Atenção:** esta pasta **não é um repositório git**. Não há histórico nem como reverter
+> edições. Antes de mexer em código, recomenda-se `git init` com um `.gitignore` que exclua
+> `assets/`, `gtalcs/`, `modloader/`, `*.ipa`, `*.zip`, `*.7z`, `build/`, `scratch/`, `*.exe`
+> (combinar com o usuário antes).
+
+## 2. O que aconteceu na sessão anterior
+
+A sessão anterior (agente Antigravity/Gemini, conversa `088c687b-2016-4cc4-a05d-a3e5e00467a7`,
+de 2026-11-22 17:27 a 2026-11-23 14:48, horário local) recebeu este fluxo de pedidos do usuário:
+
+1. Corrigir travamentos ao dirigir com o HD World ligado (crashes por corrida entre threads).
+2. *"Ainda está acontecendo pop-in de postes, árvores, fachadas, cones e outros props."*
+3. *"O desempenho ficou sofrível, ~25 FPS em algumas áreas. Queremos >100 FPS com tudo no
+   máximo. Se isso significa skinning de GPU e CPU, vamos nessa."* Também: cidade vazia ao
+   dirigir e sobreposição dos mapas LOD + HD.
+4. *"Havia bastante stutter, o jogo saindo de 160 FPS para 60. Os carros ainda spawnam muito
+   próximo. Em algumas áreas ainda há sobreposição LOD + HD."*
+
+O usuário também autorizou explicitamente o uso máximo de paralelismo: ILP, pipelining,
+superescalaridade, múltipla emissão, multithreading e multicore.
+
+### O que foi entregue e está no código
+
+| Área | Mudança | Arquivo |
+|---|---|---|
+| Crashes HD World | Serialização `ws_mtx` / `stream_mtx` / `tex_mgr_mtx` entre RenderThread, gGameTickThread e cUmdThread; `call_nested` preserva V0..V31/FPCR/FPSR | `src/game/lcs_world_hd.cpp`, `src/cpu/dynarmic_core.cpp` |
+| Neblina | `fog.distance` / `fog.start`, `LcsDistance::adjust_fog_parameters` | `src/game/lcs_distance.cpp`, `src/graphics/render_bridge.cpp` |
+| Sobreposição LOD + HD | `is_entity_lod_covered_by_hd` + varredura em `on_scan_world_post` — auditoria `Total LOD_AUDIT: 0` em `audit3.log` | `src/game/lcs_distance.cpp` |
+| Spawn de carros perto | `RecordNodeIndexesInCircle` em 360° e mínimos de `CCarCtrl::GenerateOneRandomCar` elevados (100..185 m) — `Close spawns (<90m): 0` em `audit3.log` | `src/game/lcs_distance.cpp:1750-1759` |
+| Render do mundo | Caminho nativo x64 para `BatchedWorld::C_WorldRenderManager::Render` e `C_DeferredBatchManager::Render` | `src/game/lcs_batched_fast.cpp` |
+| **Thread única** | `requestEnableGameTickThread` desviado para o ramo "disable": lógica e render do jogo rodam em série na RenderThread (ver PERFORMANCE.md §4) | `src/game/lcs_distance.cpp:1761-1768` |
+| Texturas | `upload_d3d12_texture_rgba8` sem cópia; decode PVRTC com shifts; push duplicado corrigido | `src/graphics/r_d3d12/d3d12_backend.cpp`, `src/graphics/render_bridge.cpp` |
+| HD World | Eviction O(N); cache de 8 regiões em `is_readable_guest_ptr` (VirtualQuery 2..4 ms → ~0); `step_streaming` com orçamento 3/8 | `src/game/lcs_world_hd.cpp` |
+
+### Onde travou
+
+Depois do último checkpoint (14:21) o agente rodou a sonda `audit4` (`scratch/audit4.log`,
+14:38) e começou a ler `d3d12_backend.cpp` / `render_bridge.cpp` para implementar o
+pool de texturas. A última ação foi às 14:48 (leitura de código). **Nenhuma edição de
+código foi feita depois do `audit4`.** A sessão parou sem resposta final ao usuário.
+
+## 3. Estado atual do binário e do código
+
+- `lcs.exe` (raiz, 2026-11-23 14:37) é um build **`--quick` (LTO desligado)** com a
+  instrumentação temporária `TMP_*` compilada. Ela só imprime com `LCS_DIAG_AUDIT=1`, mas o
+  build sem LTO é mais lento que o Release. **Para o usuário testar FPS, gere um Release:**
+  `python tools/build.py` (perfil `lto`).
+- A árvore `src/` corresponde a esse binário (último arquivo editado: `lcs_distance.cpp`
+  14:37; link 14:37:47).
+- Instrumentação temporária ainda presente (remover antes de entregar): ver lista completa
+  em [DIAGNOSTICO.md §3](DIAGNOSTICO.md#3-instrumentação-temporária-ainda-no-código).
+- `scratch/` tem ~430 arquivos (~1,7 GB): logs de auditoria, disassembly (`dis_*.txt`,
+  `obj_*.txt`), capturas `cruise_*.bmp/png` e scripts. São artefatos do agente anterior; os
+  mais úteis estão catalogados em DIAGNOSTICO.md §5. Podem ser apagados quando não forem
+  mais necessários (o usuário decide).
+- Dependência externa: Dynarmic vem de `D:/Games/Lichii-nx2/Lichii-nx2`
+  (`CMakeLists.txt:201`, `DYNARMIC_ROOT`). Sem essa pasta o build falha.
+- `lcs.ini` atual do usuário: `world.hd_radius=3`, `view_distance=100`,
+  `detail_distance=100`, `population_distance=100`, densidades 100, `vsync=0`, `fps=0`.
+
+## 4. Problemas abertos (prioridade)
+
+| # | Problema | Situação | Causa medida | Detalhe |
+|---|---|---|---|---|
+| 1 | Stutters ao dirigir (30..175 ms) | **Aberto** | Decode PVRTC síncrono (~14 ms por Mpx, 1 thread) + `CreateCommittedResource` por textura (~0,75 ms cada) na RenderThread | PERFORMANCE.md §3.1 |
+| 2 | Hitch ao trocar de ilha (400..2300 ms) | **Aberto** | `LoadBigBuildingsWhenNeeded` → `LoadLevel` + `LoadAllRequestedModels` síncronos + rajada de 224..850 texturas | PERFORMANCE.md §3.3 |
+| 3 | FPS médio abaixo de 100 com tudo no máximo | **Aberto** | ~11 ms de código guest por quadro em uma única thread (lógica + render serializados) | PERFORMANCE.md §2 e §4 |
+| 4 | Picos do HD World (`step` 68..79 ms; `rebuild` 2..7 ms) | **Aberto** | Leitura/inflate/Fixup de células e reconstrução total do chunk combinado na thread do jogo | HD_WORLD.md §5 |
+| 5 | Carros distantes presos em Shoreside (31 carros a 539..2129 m) | **Aberto** | `PossiblyRemoveVehicle` (0x3b4eb0) não apaga veículo "na tela" — com frustum estendido a 3200 m, quase tudo está na tela | HD_WORLD.md §6 |
+| 6 | Sobreposição LOD + HD | Corrigido na auditoria (`LOD_AUDIT=0`) | — | Confirmar com o usuário em jogo |
+| 7 | Spawn de carro próximo | Corrigido na auditoria (`<90m: 0`) | — | Confirmar com o usuário em jogo |
+
+## 5. Próximos passos recomendados
+
+Ordem pensada para dar o maior ganho perceptível primeiro. Detalhes técnicos e metas em
+[PERFORMANCE.md §5](PERFORMANCE.md#5-plano-de-paralelismo-e-otimização).
+
+1. **Baseline limpo.** Build Release (`python tools/build.py`), rodar cruzeiro com
+   `LCS_DIAG_AUDIT=1` e guardar o log como referência. Comparar com `audit4.log` (build quick).
+2. **Pipeline de texturas fora da thread crítica (P1).** Pool de workers para decode PVRTC
+   (8+ threads disponíveis no Ryzen 7 5800X), cache por hash de conteúdo, recursos D3D12
+   *placed* em heaps pré-alocados com reciclagem, destruição assíncrona e orçamento de upload
+   por quadro em vez de `split_command_list_and_wait`. Ataca o problema 1 e boa parte do 2.
+3. **HD World assíncrono (P2).** Leitura + inflate das células em worker; reconstrução
+   incremental do chunk combinado. Ataca o problema 4.
+4. **Despawn de veículos distantes (P2).** Forçar remoção de carros aleatórios/não-missão
+   além de ~380 m mesmo "na tela". Ataca o problema 5.
+5. **Custo estável por quadro (P3).** Reavaliar a decisão de thread única
+   (PERFORMANCE.md §4); nativizar os pontos quentes (`CWorld::Process` /
+   `UpdateDistanceFade`, `ScanWorld`, matrizes de ossos); testar flags *unsafe* de FP do
+   Dynarmic.
+6. **Limpeza e entrega.** Remover todo `TMP_*` / `LCS_DIAG_AUDIT`, build Release,
+   `python tools/doctor.py`, cruzeiro limpo, inspecionar capturas, informar o usuário em pt-BR.
+
+## 6. Pergunta pendente do usuário
+
+O usuário perguntou: *"É possível que no final do projeto estejamos com uma versão quase
+decompilada do jogo?"* A resposta não chegou a ser dada. Resposta correta: **não por este
+caminho.** A arquitetura é híbrida — o `libGame.so` original roda sem modificação estrutural
+num JIT ARM64→x64 (Dynarmic), e só as partes quentes ou problemáticas são interceptadas e
+reimplementadas em C++ nativo (render, streaming, texturas). Cada função nativizada reduz a
+fatia executada no JIT, mas a maior parte da lógica (scripts, IA, física, missões) continua
+sendo o binário original. Uma decompilação completa seria um projeto à parte (do tipo
+re3/reVC), não um subproduto deste.

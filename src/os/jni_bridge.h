@@ -6,10 +6,15 @@
 #include <unordered_map>
 #include <memory>
 #include <functional>
+#include <chrono>
 
 namespace lcs::cpu {
     class DynarmicCore;
     class HLEManager;
+}
+
+namespace lcs::graphics {
+    class VideoPlayer;
 }
 
 namespace lcs::os {
@@ -52,6 +57,7 @@ public:
     // Helpers to create guest objects
     uint64_t create_string_utf(const std::string& str);
     const char* get_string_utf_chars(uint64_t string_obj);
+    std::string resolve_jstring(uint64_t jstring_handle);
     uint64_t create_object_array(const std::vector<uint64_t>& elements);
 
     // Callbacks from libGame.so
@@ -62,9 +68,15 @@ public:
         bool game_loaded = false;
         bool start_game_before_load = false;
         bool start_game = false;
+        bool video_finished = false;
         bool quit_requested = false;
     };
     PendingCallbacks consume_pending_callbacks();
+
+    // Video playback lifecycle and skip control
+    void update_video(bool smoke_test = false);
+    void skip_video();
+    bool is_video_playing() const;
 
 private:
     JNIBridge();
@@ -80,6 +92,7 @@ private:
     uint64_t handle_call_method(uint64_t target, uint64_t method_id, const uint64_t* args, bool is_static, bool is_va);
     uint64_t handle_register_natives(uint64_t clazz, uint64_t methods_array, int32_t n_methods);
 
+    cpu::DynarmicCore* m_cpu = nullptr;
     void* m_memory_block = nullptr;
     size_t m_heap_bump = 0;
 
@@ -96,6 +109,14 @@ private:
     std::unordered_map<uint64_t, std::vector<uint8_t>> m_byte_arrays;
     std::unordered_map<uint64_t, std::vector<uint64_t>> m_object_arrays;
     PendingCallbacks m_pending;
+    std::unique_ptr<lcs::graphics::VideoPlayer> m_video_player;
+    std::vector<uint8_t> m_video_frame_rgba;
+    std::vector<int16_t> m_video_audio_pcm;
+    std::chrono::steady_clock::time_point m_video_start_time{};
+    int64_t m_video_last_pts_100ns = -1;
+    int64_t m_video_audio_last_pts_100ns = -1;
+    uint64_t m_video_frame_count = 0;
+    bool m_video_has_first_frame = false;
 };
 
 } // namespace lcs::os

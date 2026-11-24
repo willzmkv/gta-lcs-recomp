@@ -5,6 +5,8 @@
 #include <deque>
 #include <unordered_map>
 #include <mutex>
+#include <memory>
+#include <string>
 #include <string_view>
 
 namespace lcs::cpu {
@@ -88,6 +90,28 @@ struct ALSource {
     size_t queue_idx = 0;
     double sample_pos = 0.0;
     bool is_streaming = false;
+    bool underran = false;
+
+    // Smoothing & anti-click envelope state for mixer
+    double smoothed_gain_l = -1.0;
+    double smoothed_gain_r = -1.0;
+    double smoothed_pitch = -1.0;
+    size_t fade_in_remaining = 0;
+    size_t fade_in_total = 0;
+    size_t total_frames_played = 0;
+};
+
+struct ALFadeTail {
+    std::vector<std::shared_ptr<const ALBuffer>> buffers;
+    size_t queue_idx = 0;
+    double sample_pos = 0.0;
+    double pitch = 1.0;
+    double gain_l = 0.0;
+    double gain_r = 0.0;
+    bool looping = false;
+    bool repeat_last_buf = false;
+    size_t frames_left = 0;
+    size_t frames_total = 0;
 };
 
 struct ALListener {
@@ -141,9 +165,13 @@ private:
     ~OpenALBridge() = default;
 
     std::recursive_mutex m_mutex;
-    std::unordered_map<uint32_t, ALBuffer> m_buffers;
+    std::unordered_map<uint32_t, std::shared_ptr<ALBuffer>> m_buffers;
     std::unordered_map<uint32_t, ALSource> m_sources;
+    std::vector<ALFadeTail> m_fade_tails;
     ALListener m_listener;
+
+    bool is_mono_sfx_source(const ALSource& src) const;
+    void enqueue_fade_tail(const ALSource& src);
     uint32_t m_next_buffer_id = 1;
     uint32_t m_next_source_id = 1;
     int m_distance_model = 0xD002; // AL_INVERSE_DISTANCE_CLAMPED

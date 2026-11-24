@@ -41,6 +41,9 @@ struct TranslatedProgramHLSL {
     std::vector<AttribLayout> attribs;
     std::vector<UniformMemberLayout> uniforms;
     uint32_t cbuffer_size = 0; // padded to 256 bytes
+    std::string vs_preprocessed;
+    std::string fs_preprocessed;
+    std::unordered_map<std::string, int32_t> bound_attribs;
 };
 
 // Strips comments, evaluates #define/#ifdef/#ifndef/#if/#else/#endif, and expands macros.
@@ -53,7 +56,9 @@ ShaderReflection reflect_glsl(const std::string& preprocessed_source);
 TranslatedProgramHLSL translate_program_to_hlsl(
     const std::string& vs_preprocessed,
     const std::string& fs_preprocessed,
-    const std::unordered_map<std::string, int32_t>& bound_attrib_locations);
+    const std::unordered_map<std::string, int32_t>& bound_attrib_locations,
+    uint32_t sint_mask = 0,
+    uint32_t uint_mask = 0);
 
 // Legacy single-shader entry point.
 bool compile_shader_source(const char* glsl_src, int stage);
