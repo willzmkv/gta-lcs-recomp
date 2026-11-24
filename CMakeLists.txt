@@ -180,52 +180,40 @@ elseif(UNIX)
     )
 endif()
 
-# SDL3 Gamepad, DualSense & Platform layer
-set(SDL3_ROOT "D:/Games/VCS Recomp/deps/SDL3" CACHE PATH "Path to SDL3 headers")
-set(SDL3_LIB "D:/Games/VCS Recomp/build/release/_deps/sdl3-build/SDL3-static.lib" CACHE FILEPATH "Path to SDL3 static lib")
-if(EXISTS "${SDL3_ROOT}/include/SDL3/SDL.h" AND EXISTS "${SDL3_LIB}")
-    message(STATUS "Found precompiled SDL3: ${SDL3_LIB}")
-    target_include_directories(lcs PRIVATE "${SDL3_ROOT}/include")
-    target_link_libraries(lcs PRIVATE
-        "${SDL3_LIB}"
-        winmm
-        imm32
-        version
-        setupapi
-        cfgmgr32
-    )
-    add_compile_definitions(LCS_HAS_SDL3=1)
-endif()
+# SDL3 gamepad, DualSense & audio layer (vendored in third_party/SDL3, see VENDORED.md),
+# built as a static library from this tree.
+set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+set(SDL_STATIC ON CACHE BOOL "" FORCE)
+set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
+set(SDL_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
+add_subdirectory(third_party/SDL3 EXCLUDE_FROM_ALL)
+target_link_libraries(lcs PRIVATE SDL3::SDL3-static)
+add_compile_definitions(LCS_HAS_SDL3=1)
 
-# Dynarmic ARM64 JIT
-set(DYNARMIC_ROOT "D:/Games/Lichii-nx2/Lichii-nx2" CACHE PATH "Path to Dynarmic")
-if(EXISTS "${DYNARMIC_ROOT}/src/dynarmic/src")
-    message(STATUS "Found Dynarmic include directory: ${DYNARMIC_ROOT}/src/dynarmic/src")
-    target_include_directories(lcs PRIVATE
-        "${DYNARMIC_ROOT}/src"
-        "${DYNARMIC_ROOT}/src/dynarmic/src"
-        "${DYNARMIC_ROOT}/build/_deps/fmt-src/include"
-    )
+# Dynarmic ARM64 JIT (vendored in third_party/dynarmic, see VENDORED.md).
+# Its bundled externals (fmt, mcl, xbyak, zydis, robin-map) and a header-only Boost
+# subset (third_party/boost) are all built from this tree: no paths outside the repo.
+set(Boost_DIR "${CMAKE_SOURCE_DIR}/third_party/boost/cmake" CACHE PATH "Vendored header-only Boost" FORCE)
+set(DYNARMIC_USE_BUNDLED_EXTERNALS ON CACHE BOOL "" FORCE)
+set(DYNARMIC_FRONTENDS "A64" CACHE STRING "" FORCE)
+set(DYNARMIC_TESTS OFF CACHE BOOL "" FORCE)
+set(DYNARMIC_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
+set(DYNARMIC_IGNORE_ASSERTS ON CACHE BOOL "" FORCE)
+set(DYNARMIC_USE_PRECOMPILED_HEADERS ON CACHE BOOL "" FORCE)
+set(_lcs_saved_skip_install ${CMAKE_SKIP_INSTALL_RULES})
+set(CMAKE_SKIP_INSTALL_RULES ON)
+add_subdirectory(third_party/dynarmic EXCLUDE_FROM_ALL)
+set(CMAKE_SKIP_INSTALL_RULES ${_lcs_saved_skip_install})
+target_link_libraries(lcs PRIVATE dynarmic)
+add_compile_definitions(LCS_HAS_DYNARMIC=1)
 
-    # Boost modular headers for Dynarmic ExclusiveMonitor
-    set(BOOST_ROOT "${DYNARMIC_ROOT}/.cache/cpm/boost/1.92.0/libs")
-    if(EXISTS "${BOOST_ROOT}")
-        file(GLOB BOOST_LIB_DIRS "${BOOST_ROOT}/*")
-        foreach(lib ${BOOST_LIB_DIRS})
-            if(IS_DIRECTORY "${lib}/include")
-                target_include_directories(lcs PRIVATE "${lib}/include")
-            endif()
-        endforeach()
-    endif()
-    if(EXISTS "${DYNARMIC_ROOT}/build/src/dynarmic/src/dynarmic/dynarmic.lib")
-        message(STATUS "Found precompiled Dynarmic library: ${DYNARMIC_ROOT}/build/src/dynarmic/src/dynarmic/dynarmic.lib")
-        target_link_libraries(lcs PRIVATE
-            "${DYNARMIC_ROOT}/build/src/dynarmic/src/dynarmic/dynarmic.lib"
-            "${DYNARMIC_ROOT}/build/src/common/common.lib"
-            "${DYNARMIC_ROOT}/build/_deps/fmt-build/fmt.lib"
-        )
-        add_compile_definitions(LCS_HAS_DYNARMIC=1)
-    endif()
+# Link-time optimization for the game executable (build.py --opt lto, the default)
+if(ENABLE_LTO)
+    set_property(TARGET lcs PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+    message(STATUS "  LTO:          ON (lcs)")
 endif()
 
 # Deploy executable to project root for direct execution

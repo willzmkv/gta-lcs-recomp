@@ -32,10 +32,22 @@ class CoreCallbacks : public Dynarmic::A64::UserCallbacks {
 public:
     CoreCallbacks(DynarmicCore::Impl* parent) : m_parent(parent) {}
 
-    std::uint64_t MemoryRead(Dynarmic::A64::VAddr vaddr, std::size_t size) override;
+    // Slow-path accesses only: fastmem handles every mapped address inline.
+    std::uint64_t MemoryRead(Dynarmic::A64::VAddr vaddr, std::size_t size);
+    void MemoryWrite(Dynarmic::A64::VAddr vaddr, std::uint64_t value, std::size_t size);
+
+    std::uint8_t MemoryRead8(Dynarmic::A64::VAddr vaddr) override { return static_cast<std::uint8_t>(MemoryRead(vaddr, 1)); }
+    std::uint16_t MemoryRead16(Dynarmic::A64::VAddr vaddr) override { return static_cast<std::uint16_t>(MemoryRead(vaddr, 2)); }
+    std::uint32_t MemoryRead32(Dynarmic::A64::VAddr vaddr) override { return static_cast<std::uint32_t>(MemoryRead(vaddr, 4)); }
+    std::uint64_t MemoryRead64(Dynarmic::A64::VAddr vaddr) override { return MemoryRead(vaddr, 8); }
     Dynarmic::A64::Vector MemoryRead128(Dynarmic::A64::VAddr vaddr) override;
-    void MemoryWrite(Dynarmic::A64::VAddr vaddr, std::uint64_t value, std::size_t size) override;
+    void MemoryWrite8(Dynarmic::A64::VAddr vaddr, std::uint8_t value) override { MemoryWrite(vaddr, value, 1); }
+    void MemoryWrite16(Dynarmic::A64::VAddr vaddr, std::uint16_t value) override { MemoryWrite(vaddr, value, 2); }
+    void MemoryWrite32(Dynarmic::A64::VAddr vaddr, std::uint32_t value) override { MemoryWrite(vaddr, value, 4); }
+    void MemoryWrite64(Dynarmic::A64::VAddr vaddr, std::uint64_t value) override { MemoryWrite(vaddr, value, 8); }
     void MemoryWrite128(Dynarmic::A64::VAddr vaddr, Dynarmic::A64::Vector value) override;
+
+    void InterpreterFallback(Dynarmic::A64::VAddr pc, std::size_t num_instructions) override;
 
     bool MemoryWriteExclusive8(Dynarmic::A64::VAddr vaddr, std::uint8_t value, std::uint8_t expected) override {
         auto* ptr = reinterpret_cast<uint8_t*>(vaddr);
@@ -287,6 +299,16 @@ void CoreCallbacks::MemoryWrite128(Dynarmic::A64::VAddr vaddr, Dynarmic::A64::Ve
         return;
     }
     std::memcpy(reinterpret_cast<void*>(vaddr), value.data(), 16);
+}
+
+void CoreCallbacks::InterpreterFallback(Dynarmic::A64::VAddr pc, std::size_t num_instructions) {
+    // Dynarmic has no A64 interpreter: an instruction it cannot JIT is fatal for this call.
+    std::cerr << "[CPU] Unimplemented instruction(s) at PC 0x" << std::hex << pc << std::dec
+              << " (count " << num_instructions << ")\n";
+    m_parent->call_returned = true;
+    if (m_parent->jit) {
+        m_parent->jit->HaltExecution();
+    }
 }
 
 void CoreCallbacks::ExceptionRaised(Dynarmic::A64::VAddr pc, Dynarmic::A64::Exception exception) {
