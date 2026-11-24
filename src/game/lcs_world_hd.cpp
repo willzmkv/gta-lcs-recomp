@@ -280,6 +280,7 @@ struct LqIndex {
     float center_x = 0.0f, center_y = 0.0f;
     float detail_extent = 0.0f;                 // farthest detailed sphere centre from the cell centre
     std::unordered_set<uint32_t> lq_keys;
+    std::unordered_set<uint16_t> lq_ids;         // every LQ id the list names, hidden or not
     std::vector<std::array<float, 2>> detail_xy; // world-space centres of detailed instances
 
     // `native`: the game's own list (hidden records are not drawn). HD cell lists are drawn
@@ -287,6 +288,7 @@ struct LqIndex {
     void build(const uint64_t* buckets, float cell_x, float cell_y, bool native,
                const sBuildingDirEntry* table, int32_t table_count) {
         lq_keys.clear();
+        lq_ids.clear();
         detail_xy.clear();
         center_x = cell_x;
         center_y = cell_y;
@@ -297,6 +299,7 @@ struct LqIndex {
                 std::memcpy(&raw_id, reinterpret_cast<const void*>(p), 2);
                 std::memcpy(&gid, reinterpret_cast<const void*>(p + 2), 2);
                 if ((raw_id & 0x7fffu) >= kLqInstanceIdMin) {
+                    lq_ids.insert(static_cast<uint16_t>(raw_id & 0x7fffu));
                     if (!(raw_id & 0x8000u)) lq_keys.insert(instance_key(raw_id, gid));
                     continue;
                 }
@@ -318,10 +321,10 @@ struct LqIndex {
         built = true;
     }
 
-    // True when this list drops the LQ instance and has detailed geometry inside its sphere,
-    // i.e. the list's own detail replaces it.
+    // True when this list leaves the LQ id out (no record of it, shown or hidden) and has
+    // detailed geometry inside its sphere, i.e. the list's own detail replaces it.
     bool replaces(uint32_t key, float x, float y, float r) const {
-        if (lq_keys.count(key)) return false;
+        if (lq_ids.count(static_cast<uint16_t>(key >> 16))) return false;
         if (std::hypot(x - center_x, y - center_y) > r + detail_extent) return false;
         const float r2 = r * r;
         for (const auto& d : detail_xy) {
@@ -2064,11 +2067,18 @@ void LcsWorldHd::rebuild_combined_chunk(uint64_t ws_ptr) {
     float cur_hx = 0.0f, cur_hy = 0.0f;
     hex_cell_center(cur_cx, cur_cy, cur_hx, cur_hy);
 
-    // LQ replacement: every drawn list (the game's current cell and each ready HD cell) leaves
-    // out the low-detail instances its own detail replaces. Drawing the union of the lists
-    // would draw those LQ shells over (and around) the HD geometry, so an LQ instance is
-    // dropped when any drawn list replaces it. Bucket 0 (terrain/sea, spheres up to ~1 km) is
-    // left to the game.
+    // LQ replacement: every list leaves out the low-detail instances its own detail replaces.
+    // Drawing the union of the lists drew a neighbour's LQ shell for the player's surroundings
+    // over the current cell's detail (Harwood 1147,41: LQ 4756, r 116 m, named by 66 neighbour
+    // lists but not by the current one, covered parked cars; the player's report 2026-11-24).
+    // LCS_WHD_LQ_RULE: 1 (default) the game's current list replaces - everything it draws is
+    // drawn, so this cannot open a hole the game itself does not have; 2 every drawn list
+    // (removed whole buildings in the Red Light District, 910,-442 / 927,-342); 0 off.
+    // Bucket 0 (terrain/sea, spheres up to ~1 km) is left to the game.
+    static const int s_lq_rule = [] {
+        const char* e = std::getenv("LCS_WHD_LQ_RULE");
+        return e ? std::atoi(e) : 1;
+    }();
     std::vector<const LqIndex*> lq_lists;
     lq_lists.reserve(active.size() + 1);
     if (native_chunk) {
@@ -2079,6 +2089,7 @@ void LcsWorldHd::rebuild_combined_chunk(uint64_t ws_ptr) {
         lq_lists.push_back(&m_impl->native_lq_index);
     }
     for (auto* cell : active) {
+        if (s_lq_rule < 2) break;
         if (cell->cx == cur_cx && cell->cy == cur_cy && native_chunk) continue;
         auto& idx = const_cast<Impl::CachedCell*>(cell)->lq_index;
         float hx = 0.0f, hy = 0.0f;
@@ -2090,15 +2101,9 @@ void LcsWorldHd::rebuild_combined_chunk(uint64_t ws_ptr) {
     lq_replaced_memo.reserve(512);
     int lq_replaced_count = 0;
     // `p` is an instance record in a list whose cell centre is (list_x, list_y).
-    // LCS_WHD_LQ_RULE=1 enables the LQ replacement rule. Off by default: it removed whole
-    // buildings at some spots (Red Light District 910,-442 / 927,-342, shots 2026-11-24).
-    static const bool s_lq_rule = [] {
-        const char* e = std::getenv("LCS_WHD_LQ_RULE");
-        return e && e[0] == '1';
-    }();
     auto lq_replaced = [&](size_t bucket, uint64_t p, float list_x, float list_y) -> bool {
         const uint16_t raw_id = *reinterpret_cast<const uint16_t*>(p);
-        if (!s_lq_rule || bucket == 0 || (raw_id & 0x7fffu) < kLqInstanceIdMin) return false;
+        if (s_lq_rule <= 0 || bucket == 0 || (raw_id & 0x7fffu) < kLqInstanceIdMin) return false;
         const uint32_t key = instance_key(raw_id, *reinterpret_cast<const uint16_t*>(p + 2ULL));
         if (auto it = lq_replaced_memo.find(key); it != lq_replaced_memo.end()) return it->second;
         uint16_t hcx, hcy, hr;

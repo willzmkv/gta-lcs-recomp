@@ -13,7 +13,13 @@ Todas são lidas por `lcs.exe` (`src/core/main.cpp`, salvo indicação).
 | `LCS_DIAG_POPIN=1` | Com `CRUISE`: parado ao meio-dia em 3 pontos, 40 s cada, conta entidades novas por distância e visão (`[Popin]`, `src/game/lcs_popin_probe.*`) |
 | `LCS_DIAG_POPIN_DRIVE=1` | A mesma contagem durante o trecho dirigindo do cruzeiro |
 | `LCS_DIAG_WHD_DUMP=1` | Grava as listas das células do HD World em `scratch/whd_lists_N.csv` (analisar com `tools/whd_lists_analyze.py`) |
-| `LCS_WHD_LQ_RULE=0` | Desliga a regra de substituição LQ (A/B) |
+| `LCS_WHD_LQ_RULE=n` | Regra de substituição LQ: `1` (padrão) só a lista da célula atual do jogo tira o LQ que ela mesma troca por detalhe (não abre buraco que o jogo não tenha); `2` todas as listas desenhadas (abriu buracos na Red Light District); `0` desligada (A/B) |
+| `LCS_WHD_SPHERE_SHIFT=0` | Não desloca a esfera fp16 dos registros vizinhos (A/B; sem o deslocamento somem a porta da safehouse e fachadas HD) |
+| `LCS_DIAG_SHOTS="x,y,z,h;..."` | Com `CRUISE`: teletransporta, fixa a direção, grava `scratch/shot_N.bmp`, o dump `scratch/whd_shot_N.csv` (analisar com `scratch`/`tools`) e loga `[Shot]` (posição) e `[ShotVis]` (entidades visíveis a até 120 m) |
+| `LCS_DIAG_SHOT_RADIUS=r` | Com `SHOTS`: raio do HD World nas capturas (padrão o do `lcs.ini`) |
+| `LCS_DIAG_SKIP=distance,memory,worldhd` | Não instala esses módulos (bissecção de bugs de render). Sem `memory` o mundo não carrega |
+| `LCS_DIAG_CLOUDS=1` | Loga a cada 2 s as taxas de `CClouds::CloudRotation`/`IndividualRotation` e o valor esperado (independente de FPS) |
+| `LCS_DIAG_HUDTEXT=1` | Loga os textos do HUD (`[HudText]`: endereço de retorno, posição, fonte). Com o F3 aberto também grava `lcs_hudtext.log` ao lado do `lcs.exe` |
 | `LCS_PED_INVIEW_MIN=m` | Piso da distância de spawn de pedestres na visão (padrão: sem piso — o jogo já usa ≥ ~90 m; 100–160 m esvaziou as calçadas perto do jogador) |
 | `LCS_CAR_INVIEW_BASE=b`, `LCS_CAR_NODE_RADIUS=r` | Base do spawn de carros na visão (185) e raio de busca de nós (380) — 280/520 esvaziou as ruas |
 | `LCS_DIAG_VERIFY=1` | Liga o rig automático: navega menus, tira capturas em `scratch/verify_*.bmp`, sai sozinho. Sem ela, `main.cpp:114` segue o fluxo normal |

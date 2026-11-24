@@ -105,8 +105,10 @@ código foi feita depois do `audit4`.** A sessão parou sem resposta final ao us
 | 3 | FPS médio abaixo de 100 com tudo no máximo | **Aberto** | ~11 ms de código guest por quadro em uma única thread (lógica + render serializados) | PERFORMANCE.md §2 e §4 |
 | 4 | Picos do HD World (`step` 68..79 ms; `rebuild` 2..7 ms) | **Aberto** | Leitura/inflate/Fixup de células e reconstrução total do chunk combinado na thread do jogo | HD_WORLD.md §5 |
 | 5 | Carros distantes presos em Shoreside (31 carros a 539..2129 m) | **Aberto** | `PossiblyRemoveVehicle` (0x3b4eb0) não apaga veículo "na tela" — com frustum estendido a 3200 m, quase tudo está na tela | HD_WORLD.md §6 |
-| 6 | Sobreposição LOD + HD | Corrigido na auditoria (`LOD_AUDIT=0`) | — | Confirmar com o usuário em jogo |
-| 7 | Spawn de carro próximo | Corrigido na auditoria (`<90m: 0`) | — | Confirmar com o usuário em jogo |
+| 6 | LQ de célula vizinha por cima do detalhe perto do jogador (carros "afundados" no chão, Harwood 1147,41) | **Corrigido 2026-11-24** — `LCS_WHD_LQ_RULE=1` (padrão): o LQ que a lista da célula atual omite e cobre com o próprio detalhe sai também das listas vizinhas | O LQ 4756 (r 116 m) estava em 66 listas vizinhas e não na atual | A regra com todas as listas (`=2`) abriu buracos na Red Light District; LQ vizinho × detalhe vizinho ao longe continua sobreposto |
+| 7 | Spawn de carro | Janela de spawn mais larga esvaziou as ruas: **revertida** aos valores do jogo (185/380) | Janela de aceitação de `GenerateOneRandomCar` [130,190]×f | Confirmar com o usuário em jogo |
+| 8 | Nuvens e letreiros de LED acelerados em FPS alto | **Corrigido 2026-11-24** — `CClouds::Update` reescrito com timestep (medido com `LCS_DIAG_CLOUDS`); `CScrollBar::Update` a 30 Hz | Termos por quadro calibrados para 30 FPS | `src/game/lcs_physics_timing.cpp` |
+| 9 | Fonte antiga nos timers/contadores do HUD (Timer / Level / Sale) e títulos de missão | **Aberto** | Saem por `CHud::DrawAfterFade` (RAs 0x484aac/bc4/c3c/e7c/f54/4851ac), estilo de fonte 1 como o resto | Com o F3 aberto, `lcs_hudtext.log` registra o RA de cada texto |
 
 ## 5. Próximos passos recomendados
 

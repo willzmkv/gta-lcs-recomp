@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <chrono>
 #include <cstring>
@@ -56,6 +57,17 @@ void patch_bytes(lcs::cpu::DynarmicCore& cpu, uint64_t guest_va, const void* src
     cpu.invalidate_cache(guest_va, sz);
 }
 
+// A zeroed RWX page for code stubs; they jump back with absolute branches, so it can live anywhere.
+uint8_t* alloc_stub_page() {
+#if defined(LCS_PLATFORM_WINDOWS)
+    auto* page = static_cast<uint8_t*>(VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+#else
+    auto* page = static_cast<uint8_t*>(std::aligned_alloc(4096, 0x1000));
+#endif
+    if (page) std::memset(page, 0, 0x1000);
+    return page;
+}
+
 uint64_t patch_got(lcs::cpu::DynarmicCore& cpu, uint64_t load_bias, uint64_t got_rva, uint64_t new_target,
                    const lcs::cpu::ElfImage& image, const char* sym) {
     const uint64_t slot_va = load_bias + got_rva;
@@ -80,12 +92,38 @@ float compute_frame_scale(uint64_t timestep_ptr_va) {
 
 namespace {
 volatile uint32_t* g_scrollbar_tick = nullptr;
+const float* g_cloud_rotation = nullptr;     // CClouds::CloudRotation (LCS_DIAG_CLOUDS)
+const uint32_t* g_individual_rotation = nullptr;
+const float* g_wind = nullptr;
 } // namespace
 
 void tick_fixed_rate_effects() {
+    using Clock = std::chrono::steady_clock;
+    // LCS_DIAG_CLOUDS=1: cloud rotation rates per second (frame-rate independent when the
+    // IndividualRotation rate is 3000 * (Wind * 0.5 + 0.18) at any fps).
+    static const bool s_diag_clouds = std::getenv("LCS_DIAG_CLOUDS") != nullptr;
+    if (s_diag_clouds && g_cloud_rotation && g_individual_rotation && g_wind) {
+        static Clock::time_point s_t0 = Clock::now();
+        static float s_rot0 = *g_cloud_rotation;
+        static uint32_t s_ind0 = *g_individual_rotation;
+        static int s_frames = 0;
+        ++s_frames;
+        const double dt = std::chrono::duration<double>(Clock::now() - s_t0).count();
+        if (dt >= 2.0) {
+            const uint32_t ind = *g_individual_rotation;
+            std::printf("  [Clouds] fps %.0f wind %.3f CloudRotation/s %.5f IndividualRotation/s %.0f (expected %.0f)\n",
+                        s_frames / dt, *g_wind, (*g_cloud_rotation - s_rot0) / dt,
+                        static_cast<double>(static_cast<uint16_t>(ind - s_ind0)) / dt,
+                        3000.0 * (*g_wind * 0.5 + 0.18));
+            std::fflush(stdout);
+            s_t0 = Clock::now();
+            s_rot0 = *g_cloud_rotation;
+            s_ind0 = ind;
+            s_frames = 0;
+        }
+    }
     // Sets the CScrollBar tick on frames where a 1/30 s step elapsed (at most one per frame).
     if (!g_scrollbar_tick) return;
-    using Clock = std::chrono::steady_clock;
     static Clock::time_point s_next = Clock::now();
     const auto now = Clock::now();
     if (now >= s_next) {
@@ -392,13 +430,7 @@ void install_physics_timing_hooks(const lcs::cpu::ElfImage& image_game, lcs::cpu
     // column every 8 calls, tuned for 30 fps (4x too fast at 120 fps). Its GOT slot points to a
     // stub that runs the original only on frames where the 30 Hz tick (scrollbar_tick) is set.
     {
-#if defined(LCS_PLATFORM_WINDOWS)
-        auto* page = static_cast<uint8_t*>(VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
-#else
-        auto* page = static_cast<uint8_t*>(std::aligned_alloc(4096, 0x1000));
-#endif
-        if (page) {
-            std::memset(page, 0, 0x1000);
+        if (auto* page = alloc_stub_page()) {
             const uint64_t page_va = reinterpret_cast<uint64_t>(page);
             const uint64_t load_bias = image_game.get_load_bias();
             const uint64_t orig = patch_got(cpu, load_bias, 0x806828ULL, page_va + 0x10, image_game,
@@ -422,31 +454,74 @@ void install_physics_timing_hooks(const lcs::cpu::ElfImage& image_game, lcs::cpu
         }
     }
 
-    // CClouds::Update: IndividualRotation += 60 * (0.3 + wind * timestep * 0.5) every frame. The
-    // 0.3 is per frame (tuned for 30 fps), so clouds spun ~4x faster at 120 fps. Rewritten as
-    // 60 * timestep * (wind * 0.5 + 0.18): the same rotation at 30 fps (timestep 1.667), and
-    // frame-rate independent.
-    if (const uint64_t upd = image_game.find_symbol("_ZN7CClouds6UpdateEv")) {
+    // CClouds::Update, tuned for 30 fps (timestep 1.667) and applied every frame:
+    //   CloudRotation      += sin(camera heading - 0.85) * 0.001 * Wind           (clouds orbit)
+    //   IndividualRotation += 60 * (Wind * timestep * 0.5 + 0.3)                  (sprites spin)
+    // Both had per-frame terms, ~4x too fast at 120 fps. Rewritten as
+    //   CloudRotation      += sin(...) * 0.0006 * timestep * Wind
+    //   IndividualRotation += 60 * timestep * (Wind * 0.5 + 0.18)
+    // which give the same values at 30 fps. Here s1 = Wind and s2 = timestep.
+    const uint64_t upd = image_game.find_symbol("_ZN7CClouds6UpdateEv");
+    const uint64_t ts_va = image_game.find_symbol("_ZN6CTimer12ms_fTimeStepE");
+    const uint64_t wind_va = image_game.find_symbol("_ZN8CWeather4WindE");
+    if (upd && ts_va && wind_va) {
         auto* code = reinterpret_cast<uint32_t*>(upd);
-        // Offsets from CClouds::Update: +0xb8/+0xbc load 0.3 into w9, +0xd4..+0xe4 combine it.
-        const uint32_t* p = code + (0xb8 / 4);
-        const bool layout_ok = p[0] == 0x52933349u && p[1] == 0x72a7d329u &&        // mov/movk w9, 0.3
+        const bool layout_ok = code[0x90 / 4] == 0x52824de8u &&                      // mov  w8, #0x126f (0.001)
+                               code[0xa8 / 4] == 0x1e220800u &&                      // fmul s0, s0, s2
+                               code[0xac / 4] == 0xbd400262u &&                      // ldr  s2, [x19]
+                               code[0xb0 / 4] == 0x1f010800u &&                      // fmadd s0, s0, s1, s2
+                               code[0xb8 / 4] == 0x52933349u && code[0xbc / 4] == 0x72a7d329u &&  // w9 = 0.3
                                code[0xd4 / 4] == 0x1e210841u &&                      // fmul s1, s2, s1
                                code[0xd8 / 4] == 0x1e270122u &&                      // fmov s2, w9
                                code[0xe4 / 4] == 0x1f030821u;                        // fmadd s1, s1, s3, s2
-        if (layout_ok) {
+        uint8_t* page = layout_ok ? alloc_stub_page() : nullptr;
+        if (page) {
+            // CloudRotation: +0x90..+0xb0 computes it after sinf; jump to a stub that returns to +0xb4
+            // with s0 = new CloudRotation and s1 = Wind, as the original. x16 is free after the call.
+            static constexpr uint32_t kCloudStub[] = {
+                0x58000190u, // ldr   x16, ts_ptr
+                0xbd400201u, // ldr   s1, [x16]        timestep
+                0x1c000202u, // ldr   s2, k            0.0006
+                0x1e220800u, // fmul  s0, s0, s2
+                0x1e210800u, // fmul  s0, s0, s1
+                0x58000130u, // ldr   x16, wind_ptr
+                0xbd400201u, // ldr   s1, [x16]        Wind
+                0xbd400262u, // ldr   s2, [x19]        CloudRotation
+                0x1f010800u, // fmadd s0, s0, s1, s2
+                0x580000f0u, // ldr   x16, back
+                0xd61f0200u, // br    x16
+                0xd503201fu, // nop
+            };
+            const uint64_t page_va = reinterpret_cast<uint64_t>(page);
+            const uint64_t lits[3] = {ts_va, wind_va, upd + 0xb4};
+            const float k = 0.0006f;
+            std::memcpy(page, kCloudStub, sizeof(kCloudStub));
+            std::memcpy(page + 0x30, lits, sizeof(lits));
+            std::memcpy(page + 0x48, &k, sizeof(k));
+            cpu.invalidate_cache(page_va, 0x50);
+            const uint32_t jump[4] = {
+                0x58000050u, // ldr x16, #8
+                0xd61f0200u, // br  x16
+                static_cast<uint32_t>(page_va), static_cast<uint32_t>(page_va >> 32),
+            };
+            patch_bytes(cpu, upd + 0x90, jump, sizeof(jump));
+
+            // IndividualRotation: w9 = 0.18 at +0xb8, and +0xd4..+0xe4 combine with s3 = 0.5.
             const uint32_t mov_w9 = code[0xdc / 4];   // mov w9, #60.0
             const uint32_t ldr_s4 = code[0xe0 / 4];   // ldr s4, [x8]
             const uint32_t consts[2] = {0x528a3d89u, 0x72a7c709u};  // w9 = 0.18f
             const uint32_t combine[5] = {
                 0x1e270124u, // fmov  s4, w9          s4 = 0.18
-                0x1f031042u, // fmadd s2, s2, s3, s4  s2 = wind * 0.5 + 0.18
+                0x1f031021u, // fmadd s1, s1, s3, s4  s1 = Wind * 0.5 + 0.18
                 mov_w9,      // mov   w9, #60.0
-                0x1e210841u, // fmul  s1, s2, s1      s1 = (wind * 0.5 + 0.18) * timestep
+                0x1e220821u, // fmul  s1, s1, s2      s1 *= timestep
                 ldr_s4,      // ldr   s4, [x8]        IndividualRotation (moved after its use)
             };
             patch_bytes(cpu, upd + 0xb8, consts, sizeof(consts));
             patch_bytes(cpu, upd + 0xd4, combine, sizeof(combine));
+            g_cloud_rotation = reinterpret_cast<const float*>(image_game.find_symbol("_ZN7CClouds13CloudRotationE"));
+            g_individual_rotation = reinterpret_cast<const uint32_t*>(image_game.find_symbol("_ZN7CClouds18IndividualRotationE"));
+            g_wind = reinterpret_cast<const float*>(wind_va);
             std::cout << "  - Applied frame-rate independent CClouds::Update rotation.\n";
         } else {
             std::cerr << "  [PhysicsTiming] CClouds::Update layout differs; clouds fix not applied.\n";
