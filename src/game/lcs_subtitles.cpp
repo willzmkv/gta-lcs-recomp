@@ -1,4 +1,5 @@
 #include "game/lcs_subtitles.h"
+#include "ui/diag_overlay.h"
 
 #include "cpu/callbacks.h"
 #include "cpu/dynarmic_core.h"
@@ -21,6 +22,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #if defined(LCS_PLATFORM_WINDOWS)
@@ -440,6 +442,36 @@ uint64_t handle_print_string(const uint64_t* args) {
                       << " cjk=" << preview_cjk
                       << " dev=" << static_cast<int>(lcs::game::LCSPrompts::instance().active_device())
                       << " txt=\"" << preview_utf8 << "\"\n" << std::flush;
+        }
+    }
+
+    // LCS_DIAG_HUDTEXT=1: every distinct (return address, text) drawn through PrintString,
+    // with position and the CFont details block head (finding which HUD element is which).
+    // Also on while the F3 panel is open, so a player can record the HUD texts of a mission.
+    static const bool s_diag_hud = (std::getenv("LCS_DIAG_HUDTEXT") != nullptr);
+    if (s_diag_hud || lcs::ui_diag::is_open()) {
+        std::string t;
+        bool cjk = false;
+        const uint16_t* u = reinterpret_cast<const uint16_t*>(str_va);
+        if (u[0]) decode_u16_preserve_tags(u, t, cjk);
+        static std::unordered_set<std::string> s_seen;
+        const std::string key = std::to_string(ra_rva) + "|" + t.substr(0, 24);
+        if (!t.empty() && s_seen.size() < 400 && s_seen.insert(key).second) {
+            float fx = 0.0f, fy = 0.0f;
+            const uint32_t bx = static_cast<uint32_t>(args[2]), by = static_cast<uint32_t>(args[3]);
+            std::memcpy(&fx, &bx, 4);
+            std::memcpy(&fy, &by, 4);
+            const auto* d = *reinterpret_cast<const uint8_t* const*>(g_load_bias + kGotFontDetailsRva);
+            std::cout << "  [HudText] ra=0x" << std::hex << ra_rva << std::dec << " x=" << fx << " y=" << fy;
+            if (d) {
+                std::cout << " det=";
+                for (int i = 0; i < 0x48; i += 4) {
+                    uint32_t w;
+                    std::memcpy(&w, d + i, 4);
+                    std::cout << std::hex << w << std::dec << (i + 4 < 0x48 ? "," : "");
+                }
+            }
+            std::cout << " txt=\"" << t.substr(0, 60) << "\"\n" << std::flush;
         }
     }
 
