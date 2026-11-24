@@ -472,6 +472,13 @@ uint64_t handle_print_string(const uint64_t* args) {
                 }
             }
             std::cout << " txt=\"" << t.substr(0, 60) << "\"\n" << std::flush;
+            // Also to a file next to lcs.exe (players start it without a console)
+            static FILE* s_log = std::fopen("lcs_hudtext.log", "a");
+            if (s_log) {
+                std::fprintf(s_log, "ra=0x%llx x=%.1f y=%.1f txt=\"%s\"\n",
+                             static_cast<unsigned long long>(ra_rva), fx, fy, t.substr(0, 60).c_str());
+                std::fflush(s_log);
+            }
         }
     }
 

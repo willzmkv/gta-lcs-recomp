@@ -96,3 +96,4 @@ CMakeUserPresets.json
 *.user
 Thumbs.db
 .DS_Store
+/lcs_hudtext.log

@@ -1744,9 +1744,11 @@ int main(int argc, char* argv[]) {
     if (const char* diag_sub = std::getenv("LCS_DIAG_SUB_LANG"); diag_sub && *diag_sub) {
         lcs::settings::get().game_language = std::clamp(std::atoi(diag_sub), 0, 7);
     }
-    lcs::game::LcsDistance::instance().install(image_game, cpu);
-    lcs::game::LcsMemory::instance().install(image_game, cpu);
-    lcs::game::LcsWorldHd::instance().initialize(image_game, cpu, false);
+    // LCS_DIAG_SKIP=distance,memory,worldhd: leave modules out entirely (bisecting render bugs)
+    const std::string diag_skip = std::getenv("LCS_DIAG_SKIP") ? std::getenv("LCS_DIAG_SKIP") : "";
+    if (diag_skip.find("distance") == std::string::npos) lcs::game::LcsDistance::instance().install(image_game, cpu);
+    if (diag_skip.find("memory") == std::string::npos) lcs::game::LcsMemory::instance().install(image_game, cpu);
+    if (diag_skip.find("worldhd") == std::string::npos) lcs::game::LcsWorldHd::instance().initialize(image_game, cpu, false);
 
     std::cout << "\n[Step 6] Running guest constructors in libGame.so (.init_array)...\n";
     size_t executed = 0;
@@ -2865,13 +2867,36 @@ int main(int argc, char* argv[]) {
                                 tr.set_time_of_day(12);
                                 tr.set_weather(0);
                                 tr.teleport_to(sv[0], sv[1], sv[2], "shot");
-                                lcs::game::LcsWorldHd::instance().set_radius(lcs::settings::get().world_hd_radius);
+                                {
+                                    int rad = lcs::settings::get().world_hd_radius;
+                                    if (const char* e = std::getenv("LCS_DIAG_SHOT_RADIUS")) rad = std::atoi(e);
+                                    lcs::game::LcsWorldHd::instance().set_radius(rad);
+                                }
                             }
                             if (s_vframes <= 240) {
                                 // Face the heading every frame (GTA: 0 = north, counter-clockwise)
                                 tr.set_player_heading(sv[3]);
                             }
-                            if (s_vframes == 236) lcs::game::LcsWorldHd::instance().request_dump(shot);
+                            if (s_vframes == 236) {
+                                lcs::game::LcsWorldHd::instance().request_dump(shot);
+                                const auto ps = tr.read_snapshot();
+                                std::cout << "  [Shot] " << shot << " pos=(" << ps.pos[0] << "," << ps.pos[1] << ","
+                                          << ps.pos[2] << ")\n" << std::flush;
+                                // Visible entities near the player (CRenderer::ms_aVisibleEntityPtrs)
+                                const uint64_t lb = image_game.get_load_bias();
+                                const int32_t nvis = std::min(*reinterpret_cast<const int32_t*>(lb + 0x85ad6cULL), 4000);
+                                const auto* vis = reinterpret_cast<const uint64_t*>(lb + 0x85ad80ULL);
+                                for (int32_t vi = 0; vi < nvis; ++vi) {
+                                    const uint64_t ent = vis[vi];
+                                    if (!ent) continue;
+                                    const float* ep = reinterpret_cast<const float*>(ent + 0x40ULL);
+                                    const float dd = std::hypot(ep[0] - ps.pos[0], ep[1] - ps.pos[1]);
+                                    if (dd < 120.0f) {
+                                        std::cout << "  [ShotVis] " << shot << " model=" << *reinterpret_cast<const int16_t*>(ent + 0x7cULL)
+                                                  << " d=" << dd << " z=" << ep[2] << "\n";
+                                    }
+                                }
+                            }
                             if (s_vframes == 240) {
                                 char pbuf[64];
                                 std::snprintf(pbuf, sizeof(pbuf), "scratch/shot_%d.bmp", shot);
