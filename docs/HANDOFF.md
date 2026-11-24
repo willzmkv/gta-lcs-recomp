@@ -108,7 +108,7 @@ código foi feita depois do `audit4`.** A sessão parou sem resposta final ao us
 | 6 | LQ de célula vizinha por cima do detalhe perto do jogador (carros "afundados" no chão, Harwood 1147,41) | **Corrigido 2026-11-24** — `LCS_WHD_LQ_RULE=1` (padrão): o LQ que a lista da célula atual omite e cobre com o próprio detalhe sai também das listas vizinhas | O LQ 4756 (r 116 m) estava em 66 listas vizinhas e não na atual | A regra com todas as listas (`=2`) abriu buracos na Red Light District; LQ vizinho × detalhe vizinho ao longe continua sobreposto |
 | 7 | Spawn de carro | Janela de spawn mais larga esvaziou as ruas: **revertida** aos valores do jogo (185/380) | Janela de aceitação de `GenerateOneRandomCar` [130,190]×f | Confirmar com o usuário em jogo |
 | 8 | Nuvens e letreiros de LED acelerados em FPS alto | **Corrigido 2026-11-24** — `CClouds::Update` reescrito com timestep (medido com `LCS_DIAG_CLOUDS`); `CScrollBar::Update` a 30 Hz | Termos por quadro calibrados para 30 FPS | `src/game/lcs_physics_timing.cpp` |
-| 9 | Fonte antiga nos timers/contadores do HUD (Timer / Level / Sale) e títulos de missão | **Corrigido 2026-11-24** (Oswald; Pricedown HD em dinheiro, relógio e mensagens grandes) | Saem por `CHud::DrawAfterFade` (RAs 0x484aac/bc4/c3c/e7c/f54/4851ac), estilo de fonte 1 como o resto | Com o F3 aberto, `lcs_hudtext.log` registra o RA de cada texto |
+| 9 | Fonte antiga nos timers/contadores do HUD (Timer / Level / Sale) e títulos de missão | **Corrigido 2026-11-24** (Oswald; Pricedown HD só nas mensagens grandes — dinheiro e relógio ficam na fonte original, a pedido do usuário) | Saem por `CHud::DrawAfterFade` (RAs 0x484aac/bc4/c3c/e7c/f54/4851ac), estilo de fonte 1 como o resto | Com o F3 aberto, `lcs_hudtext.log` registra o RA de cada texto |
 
 ## 5. Próximos passos recomendados
 
@@ -158,14 +158,25 @@ Ordem pensada para dar o maior ganho perceptível primeiro. Detalhes técnicos e
    <https://www.mixmods.com.br/2022/03/shader-stochastic-gta-sa/>) portado para o backend D3D12,
    com opção no `lcs.ini`/menu.
 
+### 5.1.1 Pendências de mapa — estado
+
+- **Guindaste (1130,-224 → 1129,-246, olhando ao norte):** os guindastes de Portland
+  (`cranebasea/b` 170 m, `cranetop*` 299 m, `doc_crane_*`, sem LOD) ganham a regra de objetos
+  grandes (`large_object_far`). No rig a pé o guindaste aparece nos dois pontos, com e sem a
+  regra e na ordem longe → perto: o pop-in do usuário (de carro) não foi reproduzido.
+- **Janela da safehouse (1139.84,-242.33,23.06, área 1):** o rig não entra no interior (forçar
+  `currArea` deixa o jogador cair no beco). Pedido ao usuário: olhar a janela com o HD World em
+  raio 0 — se aparecer o exterior, o bug é nosso (`area_allows_instance`); se ficar preto, é o
+  comportamento do jogo.
+
 ### 5.2 Feito em 2026-11-24 (fim do dia)
 
 - HUD: timers, contadores (inclusive de barra), título de missão e mensagens de serviço em
   Oswald, na posição/alinhamento/escala/cor do jogo (`src/game/lcs_subtitles.cpp`,
   `classify_hud_ra`). Endereços achados com `LCS_DIAG_HUDTIMER` + `LCS_DIAG_HUDTEXT`.
-- Pricedown HD (`fonts/Pricedown Bl.otf`, fora do git por licença não verificada): "missão
-  cumprida", "wasted/busted", dinheiro e relógio (`CHud::DrawTimeAndCashNumbers`, GOT
-  `0x806a88`). Sem a fonte, tudo volta ao bitmap do jogo.
+- Pricedown HD (`fonts/Pricedown Bl.otf`, fora do git por licença não verificada) só em "missão
+  cumprida" e "wasted/busted". **O HUD em si (dinheiro, relógio) fica na fonte original** — o
+  usuário pediu (commit revertido 19658f6). Sem a fonte, volta o bitmap do jogo.
 - HD World: regra LQ da lista atual (padrão), nuvens e letreiros de LED independentes de FPS.
 
 ## 6. Pergunta pendente do usuário

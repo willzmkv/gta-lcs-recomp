@@ -1575,6 +1575,19 @@ static inline float read_simple_model_raw_largest_lod(uint64_t model_info) {
     return (std::isfinite(v) && v > 0.0f) ? v : 0.0f;
 }
 
+// Large objects stay drawn out to 30 times their bounding radius (at most 1500 m): Portland's
+// harbour cranes (raw 170-299 m, no LOD model) popped in ~550 m away, inside the view at the
+// longest draw distances (the player's report, 2026-11-24). 0 when the rule does not apply.
+static inline float large_object_far(uint64_t model_info) {
+    static const bool s_off = [] { const char* e = std::getenv("LCS_LARGE_OBJ_FAR"); return e && e[0] == '0'; }();
+    if (s_off || model_info < 0x10000ULL || lcs::settings::get().detail_distance < 30) return 0.0f;
+    const uint64_t col = *reinterpret_cast<const uint64_t*>(model_info + 0x30ULL);  // CColModel*
+    if (col < 0x10000ULL) return 0.0f;
+    const float r = *reinterpret_cast<const float*>(col + 0x0cULL);                // bounding radius
+    if (!std::isfinite(r) || r < 15.0f) return 0.0f;
+    return std::min(1500.0f, r * 30.0f);
+}
+
 uint64_t LcsDistance::on_get_elem_from_dist_pre(uint64_t model_info, uint32_t dist_bits) {
     float dist = 0.0f;
     std::memcpy(&dist, &dist_bits, sizeof(dist));
@@ -1585,6 +1598,9 @@ uint64_t LcsDistance::on_get_elem_from_dist_pre(uint64_t model_info, uint32_t di
     if (lcs::settings::get().detail_distance >= 30 && raw_largest >= 12.0f && raw_largest < 300.0f) {
         const float eff_dist = compute_prop_effective_dist(raw_largest, detail_scale);
         out_dist = dist * (raw_largest / std::max(0.1f, eff_dist));
+    }
+    if (const float far_dist = large_object_far(model_info); far_dist > 0.0f && raw_largest >= 12.0f) {
+        out_dist = std::min(out_dist, dist * (raw_largest / far_dist));
     }
 
     uint32_t out_bits = 0;
@@ -1605,6 +1621,9 @@ uint64_t LcsDistance::on_get_largest_lod_post(uint64_t model_info, uint32_t orig
             out_val = orig_ret * (eff_dist / raw_largest);
         } else if (raw_largest > 0.0f) {
             out_val = orig_ret * detail_scale;
+        }
+        if (const float far_dist = large_object_far(model_info); far_dist > 0.0f && raw_largest >= 12.0f) {
+            out_val = std::max(out_val, orig_ret * (far_dist / raw_largest));
         }
     }
 

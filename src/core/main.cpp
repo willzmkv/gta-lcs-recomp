@@ -2927,6 +2927,10 @@ int main(int argc, char* argv[]) {
                                     cpu.call_nested(add_big, {reinterpret_cast<uint64_t>(s_wasted), 4000, 2});
                                 }
                             }
+                            if (const char* area_env = std::getenv("LCS_DIAG_SHOT_AREA"); area_env && s_vframes <= 240) {
+                                // CGame::currArea: the interior the shots are in (the F3 panel's "Área")
+                                *reinterpret_cast<int32_t*>(image_game.get_load_bias() + 0x855024ULL) = std::atoi(area_env);
+                            }
                             if (s_vframes <= 240) {
                                 // Face the heading every frame (GTA: 0 = north, counter-clockwise)
                                 tr.set_player_heading(sv[3]);
@@ -2945,7 +2949,10 @@ int main(int argc, char* argv[]) {
                                     if (!ent) continue;
                                     const float* ep = reinterpret_cast<const float*>(ent + 0x40ULL);
                                     const float dd = std::hypot(ep[0] - ps.pos[0], ep[1] - ps.pos[1]);
-                                    if (dd < 120.0f) {
+                                    // (and far ones within 8 degrees of the heading: 0 = north, counter-clockwise)
+                                    const float hr = sv[3] * 3.14159265f / 180.0f;
+                                    const float cosang = dd > 1.0f ? ((ep[0] - ps.pos[0]) * -std::sin(hr) + (ep[1] - ps.pos[1]) * std::cos(hr)) / dd : 0.0f;
+                                    if (dd < 120.0f || (dd > 150.0f && cosang > 0.99f)) {
                                         std::cout << "  [ShotVis] " << shot << " model=" << *reinterpret_cast<const int16_t*>(ent + 0x7cULL)
                                                   << " d=" << dd << " z=" << ep[2] << "\n";
                                     }

@@ -17,6 +17,8 @@ Todas são lidas por `lcs.exe` (`src/core/main.cpp`, salvo indicação).
 | `LCS_WHD_SPHERE_SHIFT=0` | Não desloca a esfera fp16 dos registros vizinhos (A/B; sem o deslocamento somem a porta da safehouse e fachadas HD) |
 | `LCS_DIAG_SHOTS="x,y,z,h;..."` | Com `CRUISE`: teletransporta, fixa a direção, grava `scratch/shot_N.bmp`, o dump `scratch/whd_shot_N.csv` (analisar com `scratch`/`tools`) e loga `[Shot]` (posição) e `[ShotVis]` (entidades visíveis a até 120 m) |
 | `LCS_DIAG_SHOT_RADIUS=r` | Com `SHOTS`: raio do HD World nas capturas (padrão o do `lcs.ini`) |
+| `LCS_LARGE_OBJ_FAR=0` | Desliga a regra de objetos grandes (raio de colisão ≥ 15 m desenhados até 30× o raio, máx. 1500 m; `src/game/lcs_distance.cpp`, `large_object_far`) |
+| `LCS_DIAG_SHOT_AREA=n` | Com `SHOTS`: força `CGame::currArea` nas capturas (o piso de interiores não carrega assim: inconclusivo para a safehouse) |
 | `LCS_DIAG_SKIP=distance,memory,worldhd` | Não instala esses módulos (bissecção de bugs de render). Sem `memory` o mundo não carrega |
 | `LCS_DIAG_CLOUDS=1` | Loga a cada 2 s as taxas de `CClouds::CloudRotation`/`IndividualRotation` e o valor esperado (independente de FPS) |
 | `LCS_DIAG_HUDTIMER=1\|2` | Com `SHOTS`: cria um relógio, um contador e um contador de barra (`COnscreenTimer::AddClock/AddCounter`) no 1º shot; `1` dispara as mensagens grandes estilos 0..6 (descobrir endereços), `2` deixa na captura o título de missão + mensagem de serviço (shot 0) e "missão cumprida" + "wasted" (shot 1) |
