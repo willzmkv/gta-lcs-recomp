@@ -1,5 +1,6 @@
 #include "render_bridge.h"
 #include "window.h"
+#include "texture_pipeline.h"
 
 #if defined(LCS_ENABLE_D3D12)
 #include "r_d3d12/d3d12_backend.h"
@@ -544,6 +545,7 @@ bool RenderBridge::initialize(RenderBackend backend, void* native_window, uint32
             std::cerr << "[RenderBridge] Direct3D 12 device initialization failed.\n";
             return false;
         }
+        TexturePipeline::instance().start(decode_compressed_to_rgba8);
     }
 #else
     (void)native_window;
@@ -559,6 +561,8 @@ bool RenderBridge::initialize(RenderBackend backend, void* native_window, uint32
 
 void RenderBridge::shutdown() {
 #if defined(LCS_ENABLE_D3D12)
+    // Workers may be creating GPU resources: stop them before the device goes away.
+    TexturePipeline::instance().stop();
     d3d12::shutdown_d3d12();
 #endif
     m_initialized = false;
@@ -1624,6 +1628,39 @@ void RenderBridge::gl_compressed_tex_image_2d(uint32_t target, int32_t level, ui
                                               int32_t width, int32_t height, int32_t border,
                                               int32_t image_size, const void* data) {
     if (level != 0 || width <= 0 || height <= 0 || !data) return;
+
+#if defined(LCS_ENABLE_D3D12)
+    // Asynchronous path: copy the payload, decode on the texture pipeline's workers.
+    if (m_backend == RenderBackend::Direct3D12 && d3d12::is_d3d12_initialized() &&
+        TexturePipeline::instance().enabled()) {
+        const uint32_t id = m_bound_textures[m_active_tex_unit];
+        if (id == 0) return;
+        auto job = TexturePipeline::instance().submit(internal_format, static_cast<uint32_t>(width),
+                                                      static_cast<uint32_t>(height), image_size, data);
+        if (job) {
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                auto& tex = m_textures[id];
+                tex.id = id;
+                tex.target = target;
+                tex.width = static_cast<uint32_t>(width);
+                tex.height = static_cast<uint32_t>(height);
+                tex.internal_format = kGLRGBA;
+                tex.format = kGLRGBA;
+                tex.type = 0x1401u;
+                if (!tex.pixels.empty()) std::vector<uint8_t>().swap(tex.pixels);
+            }
+            d3d12::upload_d3d12_texture_async(id, std::move(job));
+            static auto s_last_async_pump = std::chrono::steady_clock::now();
+            const auto now = std::chrono::steady_clock::now();
+            if (now - s_last_async_pump >= std::chrono::milliseconds(40)) {
+                s_last_async_pump = now;
+                pump_loading_events();
+            }
+            return;
+        }
+    }
+#endif
 
     static const bool s_tex_audit = (std::getenv("LCS_DIAG_AUDIT") != nullptr);
     const auto t0 = s_tex_audit ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};

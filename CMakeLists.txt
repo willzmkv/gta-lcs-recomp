@@ -83,6 +83,7 @@ set(SOURCES
     src/graphics/render_bridge.cpp
     src/graphics/window.cpp
     src/graphics/shader_compiler.cpp
+    src/graphics/texture_pipeline.cpp
     src/graphics/video_player.cpp
 
     # Game world enhancements, PS2 Effects Pipeline & Trainer

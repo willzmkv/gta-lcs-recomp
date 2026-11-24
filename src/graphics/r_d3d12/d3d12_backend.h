@@ -2,8 +2,10 @@
 
 #include "graphics/render_bridge.h"
 #include "graphics/shader_compiler.h"
+#include "graphics/texture_pipeline.h"
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace lcs::graphics::d3d12 {
@@ -73,6 +75,8 @@ void update_d3d12_texture_sub(uint32_t tex_id, int32_t xoffset, int32_t yoffset,
                               uint32_t format, uint32_t type, const void* pixels);
 void set_d3d12_texture_param(uint32_t tex_id, uint32_t pname, int32_t param);
 void delete_d3d12_texture(uint32_t tex_id);
+// Uploads the result of an asynchronous TextureJob (texture_pipeline.h) once it finishes.
+void upload_d3d12_texture_async(uint32_t tex_id, std::shared_ptr<lcs::graphics::TextureJob> job);
 
 void draw_d3d12(uint32_t prog_id,
                 const D3D12RenderState& state,

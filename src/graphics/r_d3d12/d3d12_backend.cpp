@@ -1,6 +1,7 @@
 #if defined(LCS_ENABLE_D3D12)
 
 #include "d3d12_backend.h"
+#include "graphics/texture_pipeline.h"
 #include "ui/imgui_overlay.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -79,6 +80,10 @@ struct D3D12TextureEntry {
     uint32_t wrap_t = 0;
     uint32_t srv_gen = 1;
     std::vector<uint8_t> rgba_staging;
+    // Decoded pixels shared with the texture pipeline's cache (used when rgba_staging is empty)
+    std::shared_ptr<const std::vector<uint8_t>> rgba_shared;
+    // Pending asynchronous decode (texture_pipeline.h); attached at the next upload flush
+    std::shared_ptr<lcs::graphics::TextureJob> async_job;
 };
 
 struct PSOKey {
@@ -204,7 +209,11 @@ struct D3D12State {
     uint32_t next_cpu_srv_slot = 1; // slot 0 reserved for 1x1 white fallback
     std::vector<uint32_t> free_cpu_srv_slots;
     std::array<std::vector<ComPtr<ID3D12Resource>>, kFrameCount> retired_resources;
+    // Plain RGBA8 textures (and whether they are in the shader-resource state), recycled
+    // into g_tex_pool once the GPU is done with this frame slot.
+    std::array<std::vector<std::pair<ComPtr<ID3D12Resource>, bool>>, kFrameCount> retired_color_textures;
     std::array<std::vector<uint32_t>, kFrameCount> retired_srv_slots;
+    std::vector<uint32_t> async_textures;  // textures with a pending TextureJob
     std::unordered_map<uint32_t, D3D12ProgramEntry> programs;
     std::unordered_map<uint32_t, D3D12TextureEntry> textures;
     std::vector<uint32_t> pending_texture_uploads;
@@ -679,13 +688,104 @@ std::vector<uint8_t> unpack_pixels_to_rgba8(uint32_t width, uint32_t height,
     return rgba;
 }
 
+// Recycled RGBA8 Texture2D resources keyed by size. Creating a committed resource costs
+// ~0.8 ms; streaming keeps retiring and requesting the same handful of sizes. Accessed from
+// the render thread and from texture pipeline workers (ID3D12Device is free-threaded).
+struct ColorTexturePool {
+    std::mutex mtx;
+    std::unordered_map<uint64_t, std::vector<std::pair<ComPtr<ID3D12Resource>, bool>>> free;
+    size_t bytes = 0;
+    size_t budget = 256ull * 1024ull * 1024ull;
+};
+ColorTexturePool g_tex_pool;
+
+inline uint64_t color_pool_key(uint32_t w, uint32_t h) { return (uint64_t(w) << 32) | h; }
+
+bool is_poolable_color_texture(ID3D12Resource* res) {
+    if (!res) return false;
+    const D3D12_RESOURCE_DESC d = res->GetDesc();
+    return d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && d.Format == DXGI_FORMAT_R8G8B8A8_UNORM &&
+           d.MipLevels == 1 && d.DepthOrArraySize == 1 && d.SampleDesc.Count == 1 &&
+           d.Flags == D3D12_RESOURCE_FLAG_NONE;
+}
+
+// Takes a pooled texture of this size or creates one. Thread-safe.
+ComPtr<ID3D12Resource> acquire_color_texture(uint32_t w, uint32_t h, bool& in_srv_state) {
+    {
+        std::lock_guard<std::mutex> lk(g_tex_pool.mtx);
+        auto it = g_tex_pool.free.find(color_pool_key(w, h));
+        if (it != g_tex_pool.free.end() && !it->second.empty()) {
+            auto entry = std::move(it->second.back());
+            it->second.pop_back();
+            g_tex_pool.bytes -= size_t(w) * h * 4u;
+            in_srv_state = entry.second;
+            return std::move(entry.first);
+        }
+    }
+    ComPtr<ID3D12Resource> res;
+    ID3D12Device* device = g_d3d.device.Get();
+    if (!device) return res;
+    D3D12_HEAP_PROPERTIES heap_props{};
+    heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = w;
+    desc.Height = h;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    if (FAILED(device->CreateCommittedResource(&heap_props, D3D12_HEAP_FLAG_NONE, &desc,
+                                               D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&res)))) {
+        res.Reset();
+    }
+    in_srv_state = false;
+    return res;
+}
+
+// Returns a texture the GPU no longer uses to the pool (or drops it past the budget). Thread-safe.
+void release_color_texture(ComPtr<ID3D12Resource> res, bool in_srv_state) {
+    if (!res) return;
+    const D3D12_RESOURCE_DESC d = res->GetDesc();
+    const size_t sz = size_t(d.Width) * d.Height * 4u;
+    std::lock_guard<std::mutex> lk(g_tex_pool.mtx);
+    if (g_tex_pool.bytes + sz > g_tex_pool.budget) return;
+    g_tex_pool.bytes += sz;
+    g_tex_pool.free[color_pool_key(static_cast<uint32_t>(d.Width), d.Height)].emplace_back(std::move(res), in_srv_state);
+}
+
+void* pipeline_acquire_resource(uint32_t w, uint32_t h, bool& in_srv_state) {
+    return acquire_color_texture(w, h, in_srv_state).Detach();
+}
+
+void pipeline_release_resource(void* res, bool in_srv_state) {
+    ComPtr<ID3D12Resource> owned;
+    owned.Attach(static_cast<ID3D12Resource*>(res));
+    release_color_texture(std::move(owned), in_srv_state);
+}
+
+// Retires a texture resource on the current frame slot: plain color textures go back to
+// the pool after the fence, everything else is released.
+void retire_texture_resource(D3D12TextureEntry& tex) {
+    if (!tex.resource) return;
+    if (!tex.is_depth && is_poolable_color_texture(tex.resource.Get())) {
+        g_d3d.retired_color_textures[g_d3d.frame_index].emplace_back(std::move(tex.resource), tex.in_srv_state);
+    } else {
+        g_d3d.retired_resources[g_d3d.frame_index].push_back(std::move(tex.resource));
+    }
+    tex.resource.Reset();
+}
+
 bool record_texture_upload(uint32_t tex_id, D3D12TextureEntry& tex) {
     if (!tex.pending_upload || !tex.resource || !g_d3d.frame_recording) return !tex.pending_upload;
     uint32_t w = tex.full_upload ? tex.width : tex.sub_w;
     uint32_t h = tex.full_upload ? tex.height : tex.sub_h;
-    if (w == 0 || h == 0 || tex.rgba_staging.empty()) {
+    const uint8_t* src_pixels = !tex.rgba_staging.empty() ? tex.rgba_staging.data()
+                              : (tex.rgba_shared ? tex.rgba_shared->data() : nullptr);
+    if (w == 0 || h == 0 || !src_pixels) {
         tex.pending_upload = false;
         std::vector<uint8_t>().swap(tex.rgba_staging);
+        tex.rgba_shared.reset();
         return true;
     }
 
@@ -699,10 +799,14 @@ bool record_texture_upload(uint32_t tex_id, D3D12TextureEntry& tex) {
         return false;
     }
 
-    for (uint32_t y = 0; y < h; y++) {
-        std::memcpy(alloc.cpu_ptr + static_cast<size_t>(y) * dst_row_pitch,
-                    tex.rgba_staging.data() + static_cast<size_t>(y) * src_row_bytes,
-                    src_row_bytes);
+    if (dst_row_pitch == src_row_bytes) {
+        std::memcpy(alloc.cpu_ptr, src_pixels, static_cast<size_t>(src_row_bytes) * h);
+    } else {
+        for (uint32_t y = 0; y < h; y++) {
+            std::memcpy(alloc.cpu_ptr + static_cast<size_t>(y) * dst_row_pitch,
+                        src_pixels + static_cast<size_t>(y) * src_row_bytes,
+                        src_row_bytes);
+        }
     }
 
     if (tex.in_srv_state) {
@@ -745,11 +849,110 @@ bool record_texture_upload(uint32_t tex_id, D3D12TextureEntry& tex) {
     tex.in_srv_state = true;
     tex.pending_upload = false;
     std::vector<uint8_t>().swap(tex.rgba_staging);
+    tex.rgba_shared.reset();
     (void)tex_id;
     return true;
 }
 
+// Gives the entry a CPU SRV slot if it has none. Returns false when the heap is full.
+bool ensure_cpu_srv_slot(D3D12TextureEntry& tex) {
+    if (tex.cpu_slot != 0) return true;
+    if (!g_d3d.free_cpu_srv_slots.empty()) {
+        tex.cpu_slot = g_d3d.free_cpu_srv_slots.back();
+        g_d3d.free_cpu_srv_slots.pop_back();
+        return true;
+    }
+    if (g_d3d.next_cpu_srv_slot >= kMaxCpuTextures) {
+        static bool logged_full = false;
+        if (!logged_full) {
+            logged_full = true;
+            std::cerr << "[D3D12] CPU SRV heap full (" << kMaxCpuTextures << " slots).\n";
+        }
+        return false;
+    }
+    tex.cpu_slot = g_d3d.next_cpu_srv_slot++;
+    return true;
+}
+
+// (Re)creates the RGBA8 SRV for the entry's current resource and bumps its generation so
+// cached descriptor tables referencing the old resource are not reused.
+void create_texture_srv(D3D12TextureEntry& tex) {
+    if (!tex.resource || !ensure_cpu_srv_slot(tex)) return;
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc{};
+    srv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv_desc.Texture2D.MipLevels = 1;
+    g_d3d.device->CreateShaderResourceView(tex.resource.Get(), &srv_desc, cpu_srv_handle(tex.cpu_slot));
+    tex.srv_gen = ++g_d3d.next_srv_gen;
+    if (tex.srv_gen == 0) tex.srv_gen = ++g_d3d.next_srv_gen;
+}
+
+// Moves a finished TextureJob's pixels (and pre-made GPU resource) into the texture entry
+// and queues its upload. The job must be done.
+void attach_async_texture(uint32_t tex_id, D3D12TextureEntry& tex) {
+    std::shared_ptr<lcs::graphics::TextureJob> job = std::move(tex.async_job);
+    tex.async_job.reset();
+    if (!job || !job->ok || !job->rgba) return;
+
+    const bool size_changed = (tex.width != job->width || tex.height != job->height || tex.is_depth);
+    if (job->gpu_resource || size_changed || !tex.resource) {
+        retire_texture_resource(tex);
+        tex.width = job->width;
+        tex.height = job->height;
+        tex.is_depth = false;
+        tex.in_dsv_state = false;
+        if (job->gpu_resource) {
+            tex.resource.Attach(static_cast<ID3D12Resource*>(job->gpu_resource));
+            tex.in_srv_state = job->gpu_in_srv_state;
+            job->gpu_resource = nullptr;
+        } else {
+            tex.resource = acquire_color_texture(tex.width, tex.height, tex.in_srv_state);
+            if (!tex.resource) return;
+        }
+        create_texture_srv(tex);
+    }
+    std::vector<uint8_t>().swap(tex.rgba_staging);
+    tex.rgba_shared = job->rgba;
+    tex.full_upload = true;
+    if (!tex.pending_upload) {
+        tex.pending_upload = true;
+        g_d3d.pending_texture_uploads.push_back(tex_id);
+    }
+}
+
+// Attaches every texture whose decode finished; called at each upload flush.
+void poll_async_textures() {
+    if (g_d3d.async_textures.empty()) return;
+    size_t keep = 0;
+    for (size_t i = 0; i < g_d3d.async_textures.size(); ++i) {
+        const uint32_t tid = g_d3d.async_textures[i];
+        auto it = g_d3d.textures.find(tid);
+        if (it == g_d3d.textures.end() || !it->second.async_job) continue;
+        if (it->second.async_job->done()) {
+            attach_async_texture(tid, it->second);
+        } else {
+            g_d3d.async_textures[keep++] = tid;
+        }
+    }
+    g_d3d.async_textures.resize(keep);
+}
+
+// A draw needs this texture now: finish its decode on this thread if necessary and
+// record any pending upload, so the draw never samples a texture without its contents
+// (or a recycled resource still holding another texture's pixels).
+void prepare_texture_for_draw(uint32_t tex_id, D3D12TextureEntry& tex) {
+    if (tex.async_job) {
+        lcs::graphics::TexturePipeline::instance().complete(*tex.async_job);
+        attach_async_texture(tex_id, tex);
+    }
+    if (tex.pending_upload && g_d3d.frame_recording) {
+        record_texture_upload(tex_id, tex);
+    }
+}
+
 void flush_pending_texture_uploads() {
+    poll_async_textures();
     if (g_d3d.pending_texture_uploads.empty() || !g_d3d.frame_recording) return;
     const auto tp0 = g_d3d.tmp_audit_enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     std::vector<uint32_t> remaining;
@@ -1868,6 +2071,7 @@ bool init_d3d12_device(void* native_window, uint32_t width, uint32_t height) {
     g_d3d.fence_values.fill(0);
     g_d3d.main_thread_id = GetCurrentThreadId();
     g_d3d.initialized = true;
+    lcs::graphics::TexturePipeline::instance().set_resource_hooks(pipeline_acquire_resource, pipeline_release_resource);
     lcs::ui_overlay::init_d3d12(native_window, g_d3d.device.Get(), g_d3d.command_queue.Get(), kFrameCount);
 
     std::cout << "[D3D12] Device initialized on adapter: " << adapter_name
@@ -1945,6 +2149,10 @@ void begin_d3d12_frame() {
     }
     // Reclaim resources and CPU SRV slots retired on this frame slot after GPU fence wait.
     g_d3d.retired_resources[g_d3d.frame_index].clear();
+    for (auto& [res, in_srv] : g_d3d.retired_color_textures[g_d3d.frame_index]) {
+        release_color_texture(std::move(res), in_srv);
+    }
+    g_d3d.retired_color_textures[g_d3d.frame_index].clear();
     for (uint32_t slot : g_d3d.retired_srv_slots[g_d3d.frame_index]) {
         g_d3d.free_cpu_srv_slots.push_back(slot);
     }
@@ -2690,33 +2898,29 @@ namespace {
 bool prepare_d3d12_texture_entry(uint32_t tex_id, uint32_t width, uint32_t height,
                                  bool is_depth_fmt, D3D12TextureEntry*& out_tex) {
     auto& tex = g_d3d.textures[tex_id];
-    if (tex.cpu_slot == 0) {
-        if (!g_d3d.free_cpu_srv_slots.empty()) {
-            tex.cpu_slot = g_d3d.free_cpu_srv_slots.back();
-            g_d3d.free_cpu_srv_slots.pop_back();
-        } else {
-            if (g_d3d.next_cpu_srv_slot >= kMaxCpuTextures) {
-                static bool logged_full = false;
-                if (!logged_full) {
-                    logged_full = true;
-                    std::cerr << "[D3D12] CPU SRV heap full (" << kMaxCpuTextures << " slots).\n";
-                }
-                return false;
-            }
-            tex.cpu_slot = g_d3d.next_cpu_srv_slot++;
-        }
-    }
+    // A synchronous upload supersedes any decode still in flight for this texture.
+    tex.async_job.reset();
+    if (!ensure_cpu_srv_slot(tex)) return false;
 
     const bool need_realloc = (!tex.resource || tex.width != width || tex.height != height || tex.is_depth != is_depth_fmt);
     if (need_realloc) {
-        if (tex.resource) {
-            g_d3d.retired_resources[g_d3d.frame_index].push_back(std::move(tex.resource));
-        }
+        retire_texture_resource(tex);
         tex.width = width;
         tex.height = height;
         tex.is_depth = is_depth_fmt;
         tex.in_srv_state = false;
         tex.in_dsv_state = false;
+
+        if (!is_depth_fmt) {
+            tex.resource = acquire_color_texture(width, height, tex.in_srv_state);
+            if (!tex.resource) {
+                std::cerr << "[D3D12] Texture2D allocation failed (" << width << "x" << height << ").\n";
+                return false;
+            }
+            create_texture_srv(tex);
+            out_tex = &tex;
+            return true;
+        }
 
         D3D12_HEAP_PROPERTIES heap_props{};
         heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -2816,6 +3020,17 @@ void upload_d3d12_texture_rgba8(uint32_t tex_id, uint32_t width, uint32_t height
     }
 }
 
+void upload_d3d12_texture_async(uint32_t tex_id, std::shared_ptr<lcs::graphics::TextureJob> job) {
+    if (!g_d3d.initialized || tex_id == 0 || !job) return;
+    auto& tex = g_d3d.textures[tex_id];
+    if (!ensure_cpu_srv_slot(tex)) return;
+    // Until the job is attached the texture keeps its previous contents (if any); a draw
+    // that samples it first completes the job (lookup_tex_ready).
+    const bool was_listed = static_cast<bool>(tex.async_job);
+    tex.async_job = std::move(job);
+    if (!was_listed) g_d3d.async_textures.push_back(tex_id);
+}
+
 void update_d3d12_texture_sub(uint32_t tex_id, int32_t xoffset, int32_t yoffset,
                               uint32_t width, uint32_t height,
                               uint32_t format, uint32_t type, const void* pixels) {
@@ -2824,6 +3039,11 @@ void update_d3d12_texture_sub(uint32_t tex_id, int32_t xoffset, int32_t yoffset,
     if (it == g_d3d.textures.end() || !it->second.resource) return;
 
     auto& tex = it->second;
+    // The sub-rectangle applies on top of a full image whose decode may still be in flight.
+    if (tex.async_job) {
+        lcs::graphics::TexturePipeline::instance().complete(*tex.async_job);
+        attach_async_texture(tex_id, tex);
+    }
     // If a sub-upload arrives while a previous upload is pending, flush first to preserve order.
     if (tex.pending_upload && g_d3d.frame_recording) {
         flush_pending_texture_uploads();
@@ -2844,9 +3064,7 @@ void delete_d3d12_texture(uint32_t tex_id) {
     if (tex_id == 0) return;
     auto it = g_d3d.textures.find(tex_id);
     if (it == g_d3d.textures.end()) return;
-    if (it->second.resource) {
-        g_d3d.retired_resources[g_d3d.frame_index].push_back(std::move(it->second.resource));
-    }
+    retire_texture_resource(it->second);
     if (it->second.cpu_slot != 0) {
         g_d3d.retired_srv_slots[g_d3d.frame_index].push_back(it->second.cpu_slot);
     }
@@ -2900,6 +3118,15 @@ inline D3D12TextureEntry* lookup_tex_fast(uint32_t tex_id) {
     }
     g_d3d.tex_ptrs[tex_id] = &it->second;
     return &it->second;
+}
+
+// Lookup for sampling: completes a pending decode/upload first.
+inline D3D12TextureEntry* lookup_tex_ready(uint32_t tex_id) {
+    D3D12TextureEntry* tex = lookup_tex_fast(tex_id);
+    if (tex && (tex->async_job || tex->pending_upload)) {
+        prepare_texture_for_draw(tex_id, *tex);
+    }
+    return tex;
 }
 
 const D3D12ProgramEntry* find_program_fast(uint32_t prog_id) {
@@ -2972,8 +3199,8 @@ bool resolve_srv_table(const uint32_t bound_textures[8],
     const bool only_two = ((bound_textures[2] | bound_textures[3] | bound_textures[4] |
                             bound_textures[5] | bound_textures[6] | bound_textures[7]) == 0);
     if (only_two) {
-        D3D12TextureEntry* t0 = (bound_textures[0] != 0) ? lookup_tex_fast(bound_textures[0]) : nullptr;
-        D3D12TextureEntry* t1 = (bound_textures[1] != 0) ? lookup_tex_fast(bound_textures[1]) : nullptr;
+        D3D12TextureEntry* t0 = (bound_textures[0] != 0) ? lookup_tex_ready(bound_textures[0]) : nullptr;
+        D3D12TextureEntry* t1 = (bound_textures[1] != 0) ? lookup_tex_ready(bound_textures[1]) : nullptr;
         uint32_t c0 = 0, g0 = 0, c1 = 0, g1 = 0;
         uint32_t sampler_table = 0;
         if (t0) {
@@ -3016,7 +3243,7 @@ bool resolve_srv_table(const uint32_t bound_textures[8],
         uint32_t cslot = 0;
         uint32_t sgen = 0;
         if (tid != 0) {
-            if (D3D12TextureEntry* tit = lookup_tex_fast(tid)) {
+            if (D3D12TextureEntry* tit = lookup_tex_ready(tid)) {
                 if (!have_sampler) {
                     sampler_table = addr_mode_idx(tit->wrap_s) * 3u + addr_mode_idx(tit->wrap_t);
                     have_sampler = true;
@@ -4286,8 +4513,16 @@ void shutdown_d3d12() {
     g_d3d.programs.clear();
     g_d3d.textures.clear();
     g_d3d.pending_texture_uploads.clear();
+    g_d3d.async_textures.clear();
     g_d3d.free_cpu_srv_slots.clear();
     for (auto& v : g_d3d.retired_resources) v.clear();
+    for (auto& v : g_d3d.retired_color_textures) v.clear();
+    lcs::graphics::TexturePipeline::instance().set_resource_hooks(nullptr, nullptr);
+    {
+        std::lock_guard<std::mutex> lk(g_tex_pool.mtx);
+        g_tex_pool.free.clear();
+        g_tex_pool.bytes = 0;
+    }
     for (auto& v : g_d3d.retired_srv_slots) v.clear();
 
     if (g_d3d.upload_ring && g_d3d.upload_ring_mapped) {
