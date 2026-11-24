@@ -187,6 +187,20 @@ Ordem pensada para dar o maior ganho perceptível primeiro. Detalhes técnicos e
    preserva o contraste usando a média da textura) no pixel shader do mundo no D3D12, ligada por
    textura a partir de uma lista branca por nome (texdb próprio em `modloader`/`fonts`-like), nunca
    em tudo (quebraria faixas de rua, letreiros e decalques).
+   **RE feito (2026-11-24):** `python tools/d3d9_shader_dump.py <skygfx.asi> <pasta>` extrai os 66
+   shaders D3D9 (2.x) do `.asi` e desmonta com `D3DDisassemble` (sem Ghidra). Candidatos:
+   `sh_056` (3 amostras), `sh_058` (6), `sh_060` (4). Algoritmo do `sh_056` (Heitz/Unity, grade
+   triangular): `uv' = uv * 1.2`; `g = uv' * 2*sqrt(3)`; `skew = (g.x, -0.57735*g.x + 1.1547*g.y)`;
+   vértices/pesos do triângulo pelo `frac(skew)` (`temp.z = 1 - x - y`, troca se negativo);
+   `hash(v) = frac(sin((dot(v,(127.1,311.7)), dot(v,(269.5,183.3)))) * 43758.5453)`; três
+   `texldd` em `uv' + hash(v_i)` com `ddx/ddy(uv')`, somados pelos pesos (conferir no fim do
+   `sh_056` se há correção de contraste). Lista branca do SA: `SkyGfx/models/texdb.txt` (307
+   `stochastic=1`); para o LCS montar uma lista própria por nome de textura.
+4. **FramerateVigilante por RE:** Ghidra instalado (`D:\ghidra_12.2_PUBLIC`, `analyzeHeadless`).
+   O `.asi` não tem textos descritivos: listar os endereços do GTA III 1.0 que ele altera
+   (constantes 0x4xxxxx–0x5xxxxx passadas às rotinas de patch), mapear para funções do GTA III e
+   achar os equivalentes no `libGame.so` (mesma linhagem). Estudar para reimplementar, sem copiar
+   código do mod.
 
 ### 5.1.1 Pendências de mapa — estado
 
