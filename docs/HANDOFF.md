@@ -108,7 +108,7 @@ código foi feita depois do `audit4`.** A sessão parou sem resposta final ao us
 | 6 | LQ de célula vizinha por cima do detalhe perto do jogador (carros "afundados" no chão, Harwood 1147,41) | **Corrigido 2026-11-24** — `LCS_WHD_LQ_RULE=1` (padrão): o LQ que a lista da célula atual omite e cobre com o próprio detalhe sai também das listas vizinhas | O LQ 4756 (r 116 m) estava em 66 listas vizinhas e não na atual | A regra com todas as listas (`=2`) abriu buracos na Red Light District; LQ vizinho × detalhe vizinho ao longe continua sobreposto |
 | 7 | Spawn de carro | Janela de spawn mais larga esvaziou as ruas: **revertida** aos valores do jogo (185/380) | Janela de aceitação de `GenerateOneRandomCar` [130,190]×f | Confirmar com o usuário em jogo |
 | 8 | Nuvens e letreiros de LED acelerados em FPS alto | **Corrigido 2026-11-24** — `CClouds::Update` reescrito com timestep (medido com `LCS_DIAG_CLOUDS`); `CScrollBar::Update` a 30 Hz | Termos por quadro calibrados para 30 FPS | `src/game/lcs_physics_timing.cpp` |
-| 9 | Fonte antiga nos timers/contadores do HUD (Timer / Level / Sale) e títulos de missão | **Aberto** | Saem por `CHud::DrawAfterFade` (RAs 0x484aac/bc4/c3c/e7c/f54/4851ac), estilo de fonte 1 como o resto | Com o F3 aberto, `lcs_hudtext.log` registra o RA de cada texto |
+| 9 | Fonte antiga nos timers/contadores do HUD (Timer / Level / Sale) e títulos de missão | **Corrigido 2026-11-24** (Oswald; Pricedown HD em dinheiro, relógio e mensagens grandes) | Saem por `CHud::DrawAfterFade` (RAs 0x484aac/bc4/c3c/e7c/f54/4851ac), estilo de fonte 1 como o resto | Com o F3 aberto, `lcs_hudtext.log` registra o RA de cada texto |
 
 ## 5. Próximos passos recomendados
 
@@ -131,6 +131,42 @@ Ordem pensada para dar o maior ganho perceptível primeiro. Detalhes técnicos e
    Dynarmic.
 6. **Limpeza e entrega.** Remover todo `TMP_*` / `LCS_DIAG_AUDIT`, build Release,
    `python tools/doctor.py`, cruzeiro limpo, inspecionar capturas, informar o usuário em pt-BR.
+
+### 5.1 Fila do usuário (2026-11-24, nesta ordem)
+
+1. **Fechar o que está aberto:** guindaste com pop-in ao longe; exterior preto pela janela da
+   safehouse (interior, não verificado); tela cinza no primeiro load; travada ~1,6 s na troca de
+   ilha; resto do P1 (decode SIMD, BC/GPU, liberação assíncrona de VRAM).
+2. **Auditoria de 30 Hz** ("todos os timers internos e todas as funções das missões, uma por
+   uma"), no espírito do FramerateVigilante do GTA III (o `.ini` dele só tem `FPSlimit`; o
+   `.asi` não traz descrições — a lista sai do nosso RE). Já feito: `CClouds::Update`,
+   `CScrollBar::Update` (`src/game/lcs_physics_timing.cpp`). Pontos levantados:
+   - **Física:** o Toni empurra carros correndo (impulso ped→veículo aplicado por quadro).
+     Investigar `CPhysical::ApplyCollision` / `ProcessCollision` no caso ped × veículo.
+   - **Piscar por contador de quadros:** `CTimer::m_FrameCounter` (GOT `0x7f96c0`) é lido por
+     `CHud::Draw` (8 vezes: 0x47f5b0, 0x47f608, 0x47f630, 0x47f740, 0x4801c0, 0x4801d8, 0x480b68,
+     0x4810f8), `CPed::PreRender`, `CWorld::Process`, `CDarkel::DrawMessages`,
+     `CRenderer::ScanBigBuildingList`. Não redirecionar o GOT inteiro (quem incrementa pode usar o
+     mesmo slot); trocar as leituras de cada site por um contador de 30 Hz.
+   - **Scripts de missão:** loops `WAIT 0` com incrementos por iteração rodam por quadro. Ideia
+     a avaliar: `CTheScripts::Process` a 30 Hz fixo, acumulando o timestep (os TIMERA/B seguem
+     corretos), em vez de corrigir missão por missão.
+   - Ferramentas: `scratch/re/re_lib.py` (capstone; `func_range`, `dis`, `call_target`,
+     `got_ref`, mapas GOT/PLT) — fora do git.
+3. **Shader estocástico** das texturas de repetição (SkyGfx Extended, em
+   `C:\Users\dejot\Downloads\SA_-_SkyGfx_Extended\SkyGfx`; referência
+   <https://www.mixmods.com.br/2022/03/shader-stochastic-gta-sa/>) portado para o backend D3D12,
+   com opção no `lcs.ini`/menu.
+
+### 5.2 Feito em 2026-11-24 (fim do dia)
+
+- HUD: timers, contadores (inclusive de barra), título de missão e mensagens de serviço em
+  Oswald, na posição/alinhamento/escala/cor do jogo (`src/game/lcs_subtitles.cpp`,
+  `classify_hud_ra`). Endereços achados com `LCS_DIAG_HUDTIMER` + `LCS_DIAG_HUDTEXT`.
+- Pricedown HD (`fonts/Pricedown Bl.otf`, fora do git por licença não verificada): "missão
+  cumprida", "wasted/busted", dinheiro e relógio (`CHud::DrawTimeAndCashNumbers`, GOT
+  `0x806a88`). Sem a fonte, tudo volta ao bitmap do jogo.
+- HD World: regra LQ da lista atual (padrão), nuvens e letreiros de LED independentes de FPS.
 
 ## 6. Pergunta pendente do usuário
 
