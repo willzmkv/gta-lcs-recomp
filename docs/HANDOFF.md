@@ -148,6 +148,29 @@ Ordem pensada para dar o maior ganho perceptível primeiro. Detalhes técnicos e
      0x4810f8), `CPed::PreRender`, `CWorld::Process`, `CDarkel::DrawMessages`,
      `CRenderer::ScanBigBuildingList`. Não redirecionar o GOT inteiro (quem incrementa pode usar o
      mesmo slot); trocar as leituras de cada site por um contador de 30 Hz.
+   - **Feito:** HUD e mensagens de rampage piscam no ritmo de 30 FPS (wrappers no GOT de
+     `CHud::Draw` e `CDarkel::DrawMessages` trocam `m_FrameCounter` por `ms * 3 / 100` durante a
+     chamada); empurrão ped → veículo (`CPhysical::ApplyCollision`, stub em +0x34e604 escala o
+     fator de massa do ped por `min(1, timestep * 0.6)`; `LCS_PED_PUSH_FIX=0` desliga) — falta o
+     usuário confirmar em jogo.
+   - **Leitores de `m_FrameCounter` (46 funções):** `CHud::Draw` 8 (feito), `CCarAI::UpdateCarAI`
+     3, `CCarCtrl::GenerateOneRandomCar` 3, `CAutomobile::AddDamagedVehicleParticles` 3,
+     `CBoat::ProcessControl` 3, `CGarage::Update` 2, `CAutomobile::ProcessControl` 2,
+     `CBike::AddDamagedVehicleParticles` 2, `CPlane::ProcessControl` 2, `CExplosion::Update` 2,
+     e 1 cada: `CCamera::Process`, `CPlayerInfo::Process`, `CRenderer::ScanBigBuildingList`,
+     `CTimeCycle::Update`, `CTimer::Update`, `CWorld::Process`,
+     `CCarCtrl::RemoveCarsIfThePoolGetsFull`, `CDarkel::DrawMessages` (feito), `CGarages::Update`,
+     `CRoadBlocks::GenerateRoadBlocks`, `CCopPed::ProcessControl`, `CPed::ScanForThreats`,
+     `CPed::ProcessControl`, `CPed::Flee`, `CPed::PlayFootSteps`, `CPed::SetGetUp`,
+     `CPed::PreRender`, `CPed::Seek`, `CPed::SetCarJack`, `CPlayerPed::ProcessControl`,
+     `CPopulation::RemovePedsIfThePoolGetsFull`, `CRubbish::Update`, `CRubbish::StirUp`,
+     `CWaterCannon::Update_OncePerFrame`, `CWeather::Update`, `CCullZones::Update`,
+     `CAutomobile::ProcessBuoyancy`, `CAutomobile::AddWheelDirtAndWater`,
+     `CBike::AddWheelDirtAndWater`, `CHeli::ProcessControl`, `CPlane::TestRocketCollision`,
+     `CTrain::ProcessControl`, `CFerry::ProcessControl`, `CShotInfo::Update`,
+     `CWeapon::FireInstantHit`, `CWeapon::FireInstantHitFromCar`. Pisca (teste de bit) → contador
+     de 30 Hz; tarefa "a cada N quadros" (`(fc & 7) == k`) → um contador de 30 Hz **não** reduz a
+     frequência (o valor dura vários quadros): é preciso só rodar nos quadros de tique de 30 Hz.
    - **Scripts de missão:** loops `WAIT 0` com incrementos por iteração rodam por quadro. Ideia
      a avaliar: `CTheScripts::Process` a 30 Hz fixo, acumulando o timestep (os TIMERA/B seguem
      corretos), em vez de corrigir missão por missão.

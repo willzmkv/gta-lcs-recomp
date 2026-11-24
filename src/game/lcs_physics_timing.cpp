@@ -475,6 +475,62 @@ void install_physics_timing_hooks(const lcs::cpu::ElfImage& image_game, lcs::cpu
         std::cout << "  - Applied 30 fps blink rate to " << wrapped << " HUD draw functions.\n";
     }
 
+    // Peds pushing cars: CPhysical::ApplyCollision gives a ped (A) a mass factor (s9: 10, or about
+    // 1 for the player against a vehicle) and every frame of contact moves the vehicle by an
+    // impulse of that size - 4x as many pushes per second at 120 fps, so Toni could shove cars
+    // while running into them. Where A's factor is final (+0x34e604), a vehicle B scales it by
+    // min(1, timestep * 0.6): the same at 30 fps, the 30 fps impulse per second above it.
+    // LCS_PED_PUSH_FIX=0 leaves it alone.
+    if (const char* e = std::getenv("LCS_PED_PUSH_FIX"); !(e && e[0] == '0')) {
+        const uint64_t lb = image_game.get_load_bias();
+        const uint64_t ts_va = image_game.find_symbol("_ZN6CTimer12ms_fTimeStepE");
+        const auto* site = reinterpret_cast<const uint32_t*>(lb + 0x34e604ULL);
+        const bool layout_ok = site[0] == 0xf9402e88u &&  // ldr x8, [x20, #0x58]   A's flags
+                               site[1] == 0x927f0908u &&  // and x8, x8, #0xe        entity type
+                               site[2] == 0xf100191fu &&  // cmp x8, #6              ped
+                               site[3] == 0x540001c1u;    // b.ne +0x44
+        uint8_t* page = (layout_ok && ts_va) ? alloc_stub_page() : nullptr;
+        if (page) {
+            static constexpr uint32_t kPushStub[] = {
+                0xadbf07e0u, // stp   q0, q1, [sp, #-32]!
+                0xf9402e68u, // ldr   x8, [x19, #0x58]     B's flags
+                0x927f0908u, // and   x8, x8, #0xe
+                0xf100111fu, // cmp   x8, #4               vehicle
+                0x54000101u, // b.ne  restore
+                0x58000230u, // ldr   x16, ts_ptr
+                0xbd400200u, // ldr   s0, [x16]            CTimer::ms_fTimeStep
+                0x1c0002a1u, // ldr   s1, k                0.6
+                0x1e210800u, // fmul  s0, s0, s1
+                0x1e2e1001u, // fmov  s1, #1.0
+                0x1e215800u, // fmin  s0, s0, s1
+                0x1e200929u, // fmul  s9, s9, s0           A's mass factor
+                0xacc107e0u, // restore: ldp q0, q1, [sp], #32
+                0xf9402e88u, // ldr   x8, [x20, #0x58]     (the replaced instructions)
+                0x927f0908u, // and   x8, x8, #0xe
+                0xf100191fu, // cmp   x8, #6
+                0x54000061u, // b.ne  not_ped
+                0x580000f0u, // ldr   x16, cont            +0x34e614
+                0xd61f0200u, // br    x16
+                0x580000f0u, // not_ped: ldr x16, not_ped_va   +0x34e648
+                0xd61f0200u, // br    x16
+                0xd503201fu, // nop
+            };
+            const uint64_t page_va = reinterpret_cast<uint64_t>(page);
+            const uint64_t lits[3] = {ts_va, lb + 0x34e614ULL, lb + 0x34e648ULL};
+            const float k = 0.6f;
+            std::memcpy(page, kPushStub, sizeof(kPushStub));
+            std::memcpy(page + 0x58, lits, sizeof(lits));
+            std::memcpy(page + 0x70, &k, sizeof(k));
+            cpu.invalidate_cache(page_va, 0x80);
+            const uint32_t jump[4] = {0x58000050u, 0xd61f0200u,  // ldr x16, #8 ; br x16
+                                      static_cast<uint32_t>(page_va), static_cast<uint32_t>(page_va >> 32)};
+            patch_bytes(cpu, lb + 0x34e604ULL, jump, sizeof(jump));
+            std::cout << "  - Applied frame-rate independent ped -> vehicle push (ApplyCollision).\n";
+        } else {
+            std::cerr << "  [PhysicsTiming] ApplyCollision layout differs; ped push fix not applied.\n";
+        }
+    }
+
     // CScrollBar::Update (LED ticker signs): a per-instance frame counter scrolls the text one
     // column every 8 calls, tuned for 30 fps (4x too fast at 120 fps). Its GOT slot points to a
     // stub that runs the original only on frames where the 30 Hz tick (scrollbar_tick) is set.
