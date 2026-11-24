@@ -2898,7 +2898,7 @@ int main(int argc, char* argv[]) {
                         } else if (s_vstage == 204) {
                             // Spawn Kuruma (152) on flat Portland Blvd Southbound, wait to settle, board, align South
                             auto& inp = lcs::input::InputSystem::instance();
-                            if (s_vframes == 15) tr.spawn_vehicle(152);
+                            if (s_vframes == 15) tr.spawn_vehicle("kuruma", 152);
                             if (s_vframes == 55) {
                                 const bool ok = tr.teleport_beside_nearest_vehicle(152);
                                 const auto ps = tr.read_snapshot();
@@ -3183,7 +3183,7 @@ int main(int argc, char* argv[]) {
                                           << " pos=(" << cs.pos[0] << "," << cs.pos[1] << "," << cs.pos[2] << ")"
                                           << " hex=(" << cx << "," << cy << ")"
                                           << (cell_changed ? " CELL_CHANGE" : "")
-                                          << " hd=(" << whd.cached_cells << " cached," << whd.ready_cells << " ready," << whd.combined_instances << " inst)"
+                                          << " hd=(" << whd.cached_cells << " cached," << whd.ready_cells << " ready," << whd.combined_instances << " inst," << whd.lq_replaced << " lq_replaced)"
                                           << " spd=" << (spd * 60.0f)
                                           << " ms=" << ms << " peak=" << s_peak_ms
                                           << " draws=" << s_last_frame_draws << "\n" << std::flush;
@@ -3424,7 +3424,7 @@ int main(int argc, char* argv[]) {
                                     } else if (s_foot_ok == 330) {
                                         const auto ps = tr.read_snapshot();
                                         std::cout << "  [VerifyWalkedAway] pos=(" << ps.pos[0] << "," << ps.pos[1] << "," << ps.pos[2] << ")\n" << std::flush;
-                                        tr.spawn_vehicle(178); // PCJ-600
+                                        tr.spawn_vehicle("pcj600", 205);
                                         s_vstage = 14; s_vframes = 0;
                                     }
                                 }

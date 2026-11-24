@@ -53,6 +53,7 @@ public:
         int cached_cells = 0;
         int ready_cells = 0;
         int combined_instances = 0;
+        int lq_replaced = 0;  // LQ instances left out because a drawn list's detail replaces them
     };
     Stats get_stats() const;
 

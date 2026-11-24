@@ -264,6 +264,64 @@ inline uint16_t f32_to_f16(float f) {
     return static_cast<uint16_t>(sign | (static_cast<uint32_t>(new_exp) << 10) | (mant >> 13));
 }
 
+// World-stream instance ids split in two disjoint ranges (measured over 90 loaded cell lists):
+// detailed geometry below ~3320 (small spheres, in a few lists) and the resident low-detail
+// (LQ) image of the island from ~4715 up (large spheres, in most lists). A cell's list leaves
+// out the LQ instances its own detailed geometry replaces.
+constexpr uint16_t kLqInstanceIdMin = 4700;
+
+inline uint32_t instance_key(uint16_t raw_id, uint16_t gid) {
+    return (static_cast<uint32_t>(raw_id & 0x7fffu) << 16) | gid;
+}
+
+// Per cell list: which LQ instances it keeps, and where its detailed geometry is.
+struct LqIndex {
+    bool built = false;
+    float center_x = 0.0f, center_y = 0.0f;
+    float detail_extent = 0.0f;                 // farthest detailed sphere centre from the cell centre
+    std::unordered_set<uint32_t> lq_keys;
+    std::vector<std::array<float, 2>> detail_xy; // world-space centres of detailed instances
+
+    void build(const uint64_t* buckets, float cell_x, float cell_y) {
+        lq_keys.clear();
+        detail_xy.clear();
+        center_x = cell_x;
+        center_y = cell_y;
+        detail_extent = 0.0f;
+        for (size_t b = 0; b < 7; ++b) {
+            for (uint64_t p = buckets[b]; p < buckets[b + 1]; p += 0x78ULL) {
+                uint16_t raw_id, gid, hcx, hcy;
+                std::memcpy(&raw_id, reinterpret_cast<const void*>(p), 2);
+                std::memcpy(&gid, reinterpret_cast<const void*>(p + 2), 2);
+                if ((raw_id & 0x7fffu) >= kLqInstanceIdMin) {
+                    if (!(raw_id & 0x8000u)) lq_keys.insert(instance_key(raw_id, gid));
+                    continue;
+                }
+                std::memcpy(&hcx, reinterpret_cast<const void*>(p + 4), 2);
+                std::memcpy(&hcy, reinterpret_cast<const void*>(p + 6), 2);
+                const float x = f16_to_f32(hcx) + cell_x;
+                const float y = f16_to_f32(hcy) + cell_y;
+                detail_xy.push_back({x, y});
+                detail_extent = std::max(detail_extent, std::hypot(x - cell_x, y - cell_y));
+            }
+        }
+        built = true;
+    }
+
+    // True when this list drops the LQ instance and has detailed geometry inside its sphere,
+    // i.e. the list's own detail replaces it.
+    bool replaces(uint32_t key, float x, float y, float r) const {
+        if (lq_keys.count(key)) return false;
+        if (std::hypot(x - center_x, y - center_y) > r + detail_extent) return false;
+        const float r2 = r * r;
+        for (const auto& d : detail_xy) {
+            const float dx = d[0] - x, dy = d[1] - y;
+            if (dx * dx + dy * dy <= r2) return true;
+        }
+        return false;
+    }
+};
+
 } // namespace
 
 struct LcsWorldHd::Impl {
@@ -287,6 +345,7 @@ struct LcsWorldHd::Impl {
         std::vector<uint64_t> dma_models;
         bool models_registered = false;
         bool gpu_ready = false;
+        LqIndex lq_index;  // built lazily the first time the cell is drawn
     };
 
     struct SavedCurState {
@@ -393,6 +452,10 @@ struct LcsWorldHd::Impl {
     uint64_t stats_cells_evicted = 0;
     uint64_t stats_draws_swapped = 0;
     uint64_t last_native_chunk = 0;
+    // LQ index of the game's current (native) cell list, rebuilt when the native chunk changes
+    LqIndex native_lq_index;
+    uint64_t native_lq_chunk = 0;
+    int last_lq_replaced = 0;
     float    last_cam_x = 0.0f;
     float    last_cam_y = 0.0f;
     bool     first_scene_pending = true;
@@ -604,6 +667,7 @@ LcsWorldHd::Stats LcsWorldHd::get_stats() const {
     if (m_impl) {
         st.cached_cells = m_impl->cell_count.load(std::memory_order_relaxed);
         st.ready_cells = m_impl->ready_cell_count.load(std::memory_order_relaxed);
+        st.lq_replaced = m_impl->last_lq_replaced;
     }
     return st;
 }
@@ -1990,6 +2054,60 @@ void LcsWorldHd::rebuild_combined_chunk(uint64_t ws_ptr) {
     float cur_hx = 0.0f, cur_hy = 0.0f;
     hex_cell_center(cur_cx, cur_cy, cur_hx, cur_hy);
 
+    // LQ replacement: every drawn list (the game's current cell and each ready HD cell) leaves
+    // out the low-detail instances its own detail replaces. Drawing the union of the lists
+    // would draw those LQ shells over (and around) the HD geometry, so an LQ instance is
+    // dropped when any drawn list replaces it. Bucket 0 (terrain/sea, spheres up to ~1 km) is
+    // left to the game.
+    std::vector<const LqIndex*> lq_lists;
+    lq_lists.reserve(active.size() + 1);
+    if (native_chunk) {
+        if (m_impl->native_lq_chunk != native_chunk || !m_impl->native_lq_index.built) {
+            m_impl->native_lq_index.build(reinterpret_cast<const uint64_t*>(native_chunk + 0x10ULL), cur_hx, cur_hy);
+            m_impl->native_lq_chunk = native_chunk;
+        }
+        lq_lists.push_back(&m_impl->native_lq_index);
+    }
+    for (auto* cell : active) {
+        if (cell->cx == cur_cx && cell->cy == cur_cy && native_chunk) continue;
+        auto& idx = const_cast<Impl::CachedCell*>(cell)->lq_index;
+        if (!idx.built) {
+            float hx = 0.0f, hy = 0.0f;
+            hex_cell_center(cell->cx, cell->cy, hx, hy);
+            idx.build(reinterpret_cast<const uint64_t*>(cell->payload + 0x10ULL), hx, hy);
+        }
+        lq_lists.push_back(&idx);
+    }
+    std::unordered_map<uint32_t, bool> lq_replaced_memo;
+    lq_replaced_memo.reserve(512);
+    int lq_replaced_count = 0;
+    // `p` is an instance record in a list whose cell centre is (list_x, list_y).
+    // LCS_WHD_LQ_RULE=0 draws the plain union again (A/B comparisons).
+    static const bool s_lq_rule = [] {
+        const char* e = std::getenv("LCS_WHD_LQ_RULE");
+        return !(e && e[0] == '0');
+    }();
+    auto lq_replaced = [&](size_t bucket, uint64_t p, float list_x, float list_y) -> bool {
+        const uint16_t raw_id = *reinterpret_cast<const uint16_t*>(p);
+        if (!s_lq_rule || bucket == 0 || (raw_id & 0x7fffu) < kLqInstanceIdMin) return false;
+        const uint32_t key = instance_key(raw_id, *reinterpret_cast<const uint16_t*>(p + 2ULL));
+        if (auto it = lq_replaced_memo.find(key); it != lq_replaced_memo.end()) return it->second;
+        uint16_t hcx, hcy, hr;
+        std::memcpy(&hcx, reinterpret_cast<const void*>(p + 0x04ULL), 2);
+        std::memcpy(&hcy, reinterpret_cast<const void*>(p + 0x06ULL), 2);
+        std::memcpy(&hr, reinterpret_cast<const void*>(p + 0x0aULL), 2);
+        const float x = f16_to_f32(hcx) + list_x;
+        const float y = f16_to_f32(hcy) + list_y;
+        const float r = f16_to_f32(hr);
+        bool replaced = false;
+        for (const LqIndex* li : lq_lists) {
+            if (li->replaces(key, x, y, r)) { replaced = true; break; }
+        }
+        lq_replaced_memo.emplace(key, replaced);
+        if (replaced) ++lq_replaced_count;
+        return replaced;
+    };
+
     const int work_idx = (m_impl->render_depth.load(std::memory_order_acquire) > 0)
         ? (1 - m_impl->render_buf_idx)
         : (1 - m_impl->published_buf_idx);
@@ -2002,6 +2120,46 @@ void LcsWorldHd::rebuild_combined_chunk(uint64_t ws_ptr) {
 
     const auto* nat_buckets = native_chunk
         ? reinterpret_cast<const uint64_t*>(native_chunk + 0x10ULL) : nullptr;
+
+    // LCS_DIAG_WHD_DUMP=1: dumps every drawn cell list (up to 3 times) for tools/whd_lists_analyze.py
+    {
+        static const bool s_dump = (std::getenv("LCS_DIAG_WHD_DUMP") != nullptr);
+        static int s_dumps = 0;
+        static size_t s_last_active = 0;
+        if (s_dump && s_dumps < 3 && active.size() >= 20 && active.size() >= s_last_active + 8) {
+            s_last_active = active.size();
+            char path[64];
+            std::snprintf(path, sizeof(path), "scratch/whd_lists_%d.csv", s_dumps++);
+            if (FILE* f = std::fopen(path, "w")) {
+                std::fprintf(f, "src_cx,src_cy,native,bucket,raw_id,gid,wx,wy,wz,r,cam_x,cam_y,cur_cx,cur_cy\n");
+                auto dump_list = [&](const uint64_t* bk, int scx, int scy, int nat) {
+                    float hx = 0.0f, hy = 0.0f;
+                    hex_cell_center(scx, scy, hx, hy);
+                    for (size_t b = 0; b < kNumRenderBuckets; ++b) {
+                        for (uint64_t p = bk[b]; p < bk[b + 1]; p += kGeomInstSize) {
+                            uint16_t rid, g, hcx, hcy, hcz, hr;
+                            std::memcpy(&rid, reinterpret_cast<const void*>(p), 2);
+                            std::memcpy(&g, reinterpret_cast<const void*>(p + 2), 2);
+                            std::memcpy(&hcx, reinterpret_cast<const void*>(p + 4), 2);
+                            std::memcpy(&hcy, reinterpret_cast<const void*>(p + 6), 2);
+                            std::memcpy(&hcz, reinterpret_cast<const void*>(p + 8), 2);
+                            std::memcpy(&hr, reinterpret_cast<const void*>(p + 10), 2);
+                            std::fprintf(f, "%d,%d,%d,%zu,%u,%u,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%d,%d\n",
+                                         scx, scy, nat, b, rid, g, f16_to_f32(hcx) + hx, f16_to_f32(hcy) + hy,
+                                         f16_to_f32(hcz), f16_to_f32(hr), m_impl->last_cam_x, m_impl->last_cam_y,
+                                         cur_cx, cur_cy);
+                        }
+                    }
+                };
+                if (nat_buckets) dump_list(nat_buckets, cur_cx, cur_cy, 1);
+                for (const auto* cell : active) {
+                    dump_list(reinterpret_cast<const uint64_t*>(cell->payload + 0x10ULL), cell->cx, cell->cy, 0);
+                }
+                std::fclose(f);
+                std::cout << "  [WhdDump] wrote " << path << " cells=" << active.size() << "\n" << std::flush;
+            }
+        }
+    }
 
     for (size_t b = 0; b < kNumRenderBuckets; ++b) {
         uint8_t* bucket_begin = write_ptr;
@@ -2018,6 +2176,7 @@ void LcsWorldHd::rebuild_combined_chunk(uint64_t ws_ptr) {
                 // cannot resurrect instances explicitly disabled by cur (time-of-day / building swap / area).
                 if (!test_and_mark(raw_id, gid)) continue;
                 if (raw_id & 0x8000u) continue;
+                if (lq_replaced(b, p, cur_hx, cur_hy)) continue;
                 std::memcpy(write_ptr, reinterpret_cast<const void*>(p), kGeomInstSize);
                 write_ptr += kGeomInstSize;
                 ++total_count;
@@ -2040,6 +2199,7 @@ void LcsWorldHd::rebuild_combined_chunk(uint64_t ws_ptr) {
                 if (gid >= static_cast<uint32_t>(table_count) || !table[gid].geomPtr) continue;
                 if (!area_allows_instance(ws_ptr, dir_ptr, raw_id)) continue;
                 if (!test_and_mark(raw_id, gid)) continue;
+                if (lq_replaced(b, p, cell_hx, cell_hy)) continue;
                 std::memcpy(write_ptr, reinterpret_cast<const void*>(p), kGeomInstSize);
                 *reinterpret_cast<uint16_t*>(write_ptr) = raw_id & 0x7fffu;
                 if ((dx != 0.0f || dy != 0.0f) &&
@@ -2104,6 +2264,7 @@ void LcsWorldHd::rebuild_combined_chunk(uint64_t ws_ptr) {
         m_impl->combined_vec_slot[0] = reinterpret_cast<uint64_t>(dst_chunk);
     }
     m_combined_inst_count = static_cast<int>(total_count);
+    m_impl->last_lq_replaced = lq_replaced_count;
     m_combined_dirty = false;
 }
 
