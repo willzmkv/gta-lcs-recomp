@@ -171,6 +171,7 @@ Ordem pensada para dar o maior ganho perceptível primeiro. Detalhes técnicos e
      `CWeapon::FireInstantHit`, `CWeapon::FireInstantHitFromCar`. Pisca (teste de bit) → contador
      de 30 Hz; tarefa "a cada N quadros" (`(fc & 7) == k`) → um contador de 30 Hz **não** reduz a
      frequência (o valor dura vários quadros): é preciso só rodar nos quadros de tique de 30 Hz.
+     **Tabela por site (66 leituras) e desenho da correção: `docs/AUDITORIA_30HZ.md`.**
    - **Scripts de missão:** loops `WAIT 0` com incrementos por iteração rodam por quadro. Ideia
      a avaliar: `CTheScripts::Process` a 30 Hz fixo, acumulando o timestep (os TIMERA/B seguem
      corretos), em vez de corrigir missão por missão.
