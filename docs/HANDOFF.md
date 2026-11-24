@@ -179,7 +179,14 @@ Ordem pensada para dar o maior ganho perceptível primeiro. Detalhes técnicos e
 3. **Shader estocástico** das texturas de repetição (SkyGfx Extended, em
    `C:\Users\dejot\Downloads\SA_-_SkyGfx_Extended\SkyGfx`; referência
    <https://www.mixmods.com.br/2022/03/shader-stochastic-gta-sa/>) portado para o backend D3D12,
-   com opção no `lcs.ini`/menu.
+   com opção no `lcs.ini`/menu. Levantado: no SkyGfx o shader está compilado dentro do
+   `skygfx.asi` (sem fonte) e só vale para texturas marcadas `stochastic=` nos arquivos texdb
+   (`stochasticTexturing=1` no `skygfx1.ini`: "grass, concrete etc"). Plano: implementar a técnica
+   conhecida (grade triangular/hex-tiling: 3 amostras com deslocamento pseudoaleatório por vértice
+   da grade, pesos baricêntricos, `SampleGrad` com as derivadas do UV original, mistura que
+   preserva o contraste usando a média da textura) no pixel shader do mundo no D3D12, ligada por
+   textura a partir de uma lista branca por nome (texdb próprio em `modloader`/`fonts`-like), nunca
+   em tudo (quebraria faixas de rua, letreiros e decalques).
 
 ### 5.1.1 Pendências de mapa — estado
 
