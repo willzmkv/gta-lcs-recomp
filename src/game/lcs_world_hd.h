@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -36,6 +37,8 @@ public:
     int current_level() const { return m_active_level; }
     int loaded_cell_count() const;
     int rendered_instance_count() const { return m_combined_inst_count; }
+    // Dumps the drawn cell lists to scratch/whd_shot_<tag>.csv at the next rebuild (rig).
+    void request_dump(int tag) { m_dump_request.store(tag); m_combined_dirty = true; }
 
 private:
     LcsWorldHd() = default;
@@ -112,6 +115,7 @@ private:
     bool m_enable_dump = false;
     bool m_combined_dirty = true;
     bool m_reregister_needed = false;
+    std::atomic<int> m_dump_request{-1};
 
     // Guest symbol RVAs / pointers resolved on init
     uint64_t m_got_ws_inst = 0;

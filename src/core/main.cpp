@@ -2871,6 +2871,7 @@ int main(int argc, char* argv[]) {
                                 // Face the heading every frame (GTA: 0 = north, counter-clockwise)
                                 tr.set_player_heading(sv[3]);
                             }
+                            if (s_vframes == 236) lcs::game::LcsWorldHd::instance().request_dump(shot);
                             if (s_vframes == 240) {
                                 char pbuf[64];
                                 std::snprintf(pbuf, sizeof(pbuf), "scratch/shot_%d.bmp", shot);

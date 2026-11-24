@@ -282,7 +282,10 @@ struct LqIndex {
     std::unordered_set<uint32_t> lq_keys;
     std::vector<std::array<float, 2>> detail_xy; // world-space centres of detailed instances
 
-    void build(const uint64_t* buckets, float cell_x, float cell_y) {
+    // `native`: the game's own list (hidden records are not drawn). HD cell lists are drawn
+    // with bit 15 cleared, but only records whose geometry is resident (table[gid].geomPtr).
+    void build(const uint64_t* buckets, float cell_x, float cell_y, bool native,
+               const sBuildingDirEntry* table, int32_t table_count) {
         lq_keys.clear();
         detail_xy.clear();
         center_x = cell_x;
@@ -297,12 +300,19 @@ struct LqIndex {
                     if (!(raw_id & 0x8000u)) lq_keys.insert(instance_key(raw_id, gid));
                     continue;
                 }
+                // Only drawn detail replaces anything.
+                if (native ? (raw_id & 0x8000u) != 0
+                           : (gid >= static_cast<uint32_t>(table_count) || !table[gid].geomPtr)) continue;
                 std::memcpy(&hcx, reinterpret_cast<const void*>(p + 4), 2);
                 std::memcpy(&hcy, reinterpret_cast<const void*>(p + 6), 2);
-                const float x = f16_to_f32(hcx) + cell_x;
-                const float y = f16_to_f32(hcy) + cell_y;
+                const float x = f16_to_f32(hcx);  // spheres are world coordinates
+                const float y = f16_to_f32(hcy);
+                const float from_cell = std::hypot(x - cell_x, y - cell_y);
+                // Records with their own matrix (+0x30) are not cell-relative: their sphere
+                // cannot be placed this way (they showed up 400-530 m from their cell).
+                if (*reinterpret_cast<const uint64_t*>(p + 0x30ULL) != 0 || from_cell > 250.0f) continue;
                 detail_xy.push_back({x, y});
-                detail_extent = std::max(detail_extent, std::hypot(x - cell_x, y - cell_y));
+                detail_extent = std::max(detail_extent, from_cell);
             }
         }
         built = true;
@@ -2062,20 +2072,18 @@ void LcsWorldHd::rebuild_combined_chunk(uint64_t ws_ptr) {
     std::vector<const LqIndex*> lq_lists;
     lq_lists.reserve(active.size() + 1);
     if (native_chunk) {
-        if (m_impl->native_lq_chunk != native_chunk || !m_impl->native_lq_index.built) {
-            m_impl->native_lq_index.build(reinterpret_cast<const uint64_t*>(native_chunk + 0x10ULL), cur_hx, cur_hy);
-            m_impl->native_lq_chunk = native_chunk;
-        }
+        // Rebuilt every time: which geometry is resident changes with streaming.
+        m_impl->native_lq_index.build(reinterpret_cast<const uint64_t*>(native_chunk + 0x10ULL), cur_hx, cur_hy,
+                                      true, table, table_count);
+        m_impl->native_lq_chunk = native_chunk;
         lq_lists.push_back(&m_impl->native_lq_index);
     }
     for (auto* cell : active) {
         if (cell->cx == cur_cx && cell->cy == cur_cy && native_chunk) continue;
         auto& idx = const_cast<Impl::CachedCell*>(cell)->lq_index;
-        if (!idx.built) {
-            float hx = 0.0f, hy = 0.0f;
-            hex_cell_center(cell->cx, cell->cy, hx, hy);
-            idx.build(reinterpret_cast<const uint64_t*>(cell->payload + 0x10ULL), hx, hy);
-        }
+        float hx = 0.0f, hy = 0.0f;
+        hex_cell_center(cell->cx, cell->cy, hx, hy);
+        idx.build(reinterpret_cast<const uint64_t*>(cell->payload + 0x10ULL), hx, hy, false, table, table_count);
         lq_lists.push_back(&idx);
     }
     std::unordered_map<uint32_t, bool> lq_replaced_memo;
@@ -2097,8 +2105,10 @@ void LcsWorldHd::rebuild_combined_chunk(uint64_t ws_ptr) {
         std::memcpy(&hcx, reinterpret_cast<const void*>(p + 0x04ULL), 2);
         std::memcpy(&hcy, reinterpret_cast<const void*>(p + 0x06ULL), 2);
         std::memcpy(&hr, reinterpret_cast<const void*>(p + 0x0aULL), 2);
-        const float x = f16_to_f32(hcx) + list_x;
-        const float y = f16_to_f32(hcy) + list_y;
+        (void)list_x;
+        (void)list_y;
+        const float x = f16_to_f32(hcx);  // world coordinates, whatever list holds the record
+        const float y = f16_to_f32(hcy);
         const float r = f16_to_f32(hr);
         bool replaced = false;
         for (const LqIndex* li : lq_lists) {
@@ -2127,10 +2137,15 @@ void LcsWorldHd::rebuild_combined_chunk(uint64_t ws_ptr) {
         static const bool s_dump = (std::getenv("LCS_DIAG_WHD_DUMP") != nullptr);
         static int s_dumps = 0;
         static size_t s_last_active = 0;
-        if (s_dump && s_dumps < 3 && active.size() >= 20 && active.size() >= s_last_active + 8) {
-            s_last_active = active.size();
+        const int req = m_dump_request.exchange(-1);
+        if (req >= 0 || (s_dump && s_dumps < 3 && active.size() >= 20 && active.size() >= s_last_active + 8)) {
             char path[64];
-            std::snprintf(path, sizeof(path), "scratch/whd_lists_%d.csv", s_dumps++);
+            if (req >= 0) {
+                std::snprintf(path, sizeof(path), "scratch/whd_shot_%d.csv", req);
+            } else {
+                s_last_active = active.size();
+                std::snprintf(path, sizeof(path), "scratch/whd_lists_%d.csv", s_dumps++);
+            }
             if (FILE* f = std::fopen(path, "w")) {
                 std::fprintf(f, "src_cx,src_cy,native,bucket,raw_id,gid,wx,wy,wz,r,cam_x,cam_y,cur_cx,cur_cy\n");
                 auto dump_list = [&](const uint64_t* bk, int scx, int scy, int nat) {
@@ -2145,10 +2160,13 @@ void LcsWorldHd::rebuild_combined_chunk(uint64_t ws_ptr) {
                             std::memcpy(&hcy, reinterpret_cast<const void*>(p + 6), 2);
                             std::memcpy(&hcz, reinterpret_cast<const void*>(p + 8), 2);
                             std::memcpy(&hr, reinterpret_cast<const void*>(p + 10), 2);
-                            std::fprintf(f, "%d,%d,%d,%zu,%u,%u,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%d,%d\n",
+                            const uint64_t m30 = *reinterpret_cast<const uint64_t*>(p + 0x30);
+                            const float px = *reinterpret_cast<const float*>(p + 0x68);
+                            const float py = *reinterpret_cast<const float*>(p + 0x6c);
+                            std::fprintf(f, "%d,%d,%d,%zu,%u,%u,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%d,%d,%d,%.1f,%.1f\n",
                                          scx, scy, nat, b, rid, g, f16_to_f32(hcx) + hx, f16_to_f32(hcy) + hy,
                                          f16_to_f32(hcz), f16_to_f32(hr), m_impl->last_cam_x, m_impl->last_cam_y,
-                                         cur_cx, cur_cy);
+                                         cur_cx, cur_cy, m30 ? 1 : 0, px, py);
                         }
                     }
                 };
@@ -2205,15 +2223,12 @@ void LcsWorldHd::rebuild_combined_chunk(uint64_t ws_ptr) {
                 *reinterpret_cast<uint16_t*>(write_ptr) = raw_id & 0x7fffu;
                 if ((dx != 0.0f || dy != 0.0f) &&
                     *reinterpret_cast<const uint64_t*>(write_ptr + 0x30ULL) == 0ULL) {
+                    // The position (+0x68) is relative to the record's cell; the bounding sphere
+                    // (+0x04, fp16) is in world coordinates, identical in every list that holds
+                    // the record, so it must not be moved (moving it made frustum culling drop
+                    // visible HD buildings).
                     *reinterpret_cast<float*>(write_ptr + 0x68ULL) += dx;
                     *reinterpret_cast<float*>(write_ptr + 0x6cULL) += dy;
-                    uint16_t hcx = 0, hcy = 0;
-                    std::memcpy(&hcx, write_ptr + 0x04ULL, sizeof(uint16_t));
-                    std::memcpy(&hcy, write_ptr + 0x06ULL, sizeof(uint16_t));
-                    hcx = f32_to_f16(f16_to_f32(hcx) + dx);
-                    hcy = f32_to_f16(f16_to_f32(hcy) + dy);
-                    std::memcpy(write_ptr + 0x04ULL, &hcx, sizeof(uint16_t));
-                    std::memcpy(write_ptr + 0x06ULL, &hcy, sizeof(uint16_t));
                 }
                 write_ptr += kGeomInstSize;
                 ++total_count;
