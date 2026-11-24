@@ -47,6 +47,7 @@ private:
     void on_scan_world_pre();
     void on_scan_world_post();
     void update_330m_patches(float view_scale);
+    void sync_spawn_distances();
 
     lcs::cpu::DynarmicCore* m_cpu = nullptr;
     uint64_t m_load_bias = 0;
@@ -85,6 +86,9 @@ private:
     float    m_applied_300_clamp   = -1.0f;
     float    m_applied_add_dyn_sq  = -1.0f;
     int      m_applied_keep_sec    = -1;
+    float    m_applied_car_inview  = -1.0f;
+    float    m_applied_car_node_radius = -1.0f;
+    float*   m_ped_inview_floor    = nullptr;  // [min, span] read by the GeneratePedCreationCoors stub
 
     // Guest addresses inside stub_page for zero-trap ARM64 stubs
     uint64_t m_va_scaled_lod_struct = 0;

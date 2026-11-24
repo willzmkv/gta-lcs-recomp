@@ -559,6 +559,62 @@ bool LCSTrainer::consume_quit_request() {
     return q;
 }
 
+DiagSnapshot LCSTrainer::read_diag() const {
+    DiagSnapshot d;
+    if (!m_attached) return d;
+    const uint64_t ped = get_player_ped();
+    if (!ped || !is_readable_ptr(ped + kEntityPosOffset, 12)) return d;
+    d.valid = true;
+    const float* pos = reinterpret_cast<const float*>(ped + kEntityPosOffset);
+    d.pos[0] = pos[0];
+    d.pos[1] = pos[1];
+    d.pos[2] = pos[2];
+    const uint64_t veh = get_player_vehicle();
+    // CMatrix: right at +0x10, forward at +0x20
+    const float* mat = reinterpret_cast<const float*>((veh ? veh : ped) + kEntityMatrixOffset);
+    d.heading_deg = std::atan2(-mat[4], mat[5]) * 57.29578f;
+    if (d.heading_deg < 0.0f) d.heading_deg += 360.0f;
+    d.area = m_curr_area_addr ? *reinterpret_cast<const int32_t*>(m_curr_area_addr) : 0;
+    d.health = *reinterpret_cast<const float*>(ped + kPedHealthOffset);
+    d.armour = *reinterpret_cast<const float*>(ped + kPedArmourOffset);
+    if (const uint64_t pinfo = get_player_info()) {
+        d.money = *reinterpret_cast<const int32_t*>(pinfo + kPlayerInfoMoneyOffset);
+    }
+    if (m_clock_hours_addr) d.clock_hour = *reinterpret_cast<const uint8_t*>(m_clock_hours_addr);
+    if (m_clock_mins_addr) d.clock_minute = *reinterpret_cast<const uint8_t*>(m_clock_mins_addr);
+    for (int slot = 0; slot < 10; ++slot) {
+        const uint64_t w = ped + kPedWeaponsOffset + static_cast<uint64_t>(slot) * kPedWeaponStride;
+        const int type = *reinterpret_cast<const int32_t*>(w);
+        if (type <= 0 || type > 36) continue;
+        auto& out = d.weapons[d.weapon_count++];
+        out.type = type;
+        out.clip = *reinterpret_cast<const int32_t*>(w + 0x08);
+        out.total = *reinterpret_cast<const int32_t*>(w + 0x0c);
+    }
+    if (veh) {
+        d.in_vehicle = true;
+        d.vehicle_model = *reinterpret_cast<const int16_t*>(veh + 0x7cULL);
+        const float* v = reinterpret_cast<const float*>(veh + kVehMoveSpeedOffset);
+        // Move speed is in units per 1/50 s
+        d.vehicle_speed_kmh = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) * 50.0f * 3.6f;
+        d.vehicle_health = *reinterpret_cast<const float*>(veh + kVehHealthOffset);
+    }
+    // CPool: objects +0x00, flag bytes +0x08 (bit 7 = free), size +0x10
+    auto pool_use = [this](uint64_t got_rva, int& used, int& cap) {
+        const uint64_t var = *reinterpret_cast<const uint64_t*>(m_load_bias + got_rva);
+        const uint64_t pool = var ? *reinterpret_cast<const uint64_t*>(var) : 0;
+        if (!pool) return;
+        const uint64_t flags = *reinterpret_cast<const uint64_t*>(pool + 0x08);
+        cap = *reinterpret_cast<const int32_t*>(pool + 0x10);
+        for (int i = 0; flags && i < cap; ++i) {
+            if ((*reinterpret_cast<const uint8_t*>(flags + i) & 0x80u) == 0) ++used;
+        }
+    };
+    pool_use(0x7f9a38ULL, d.peds_used, d.peds_cap);      // CPools::ms_pPedPool
+    pool_use(0x7f9720ULL, d.vehicles_used, d.vehicles_cap); // CPools::ms_pVehiclePool
+    return d;
+}
+
 GameSnapshot LCSTrainer::read_snapshot() const {
     GameSnapshot snap;
     snap.attached = m_attached;

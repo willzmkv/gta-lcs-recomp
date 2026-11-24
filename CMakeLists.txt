@@ -88,6 +88,7 @@ set(SOURCES
 
     # Game world enhancements, PS2 Effects Pipeline & Trainer
     src/game/lcs_world_hd.cpp
+    src/game/lcs_popin_probe.cpp
     src/game/lcs_batched_fast.cpp
     src/game/lcs_distance.cpp
     src/game/lcs_memory.cpp
@@ -105,6 +106,7 @@ set(SOURCES
     src/ui/ui_theme.cpp
     src/ui/global_menu.cpp
     src/ui/imgui_overlay.cpp
+    src/ui/diag_overlay.cpp
 
     # Dear ImGui core + backends
     third_party/imgui/imgui.cpp

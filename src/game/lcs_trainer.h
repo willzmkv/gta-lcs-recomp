@@ -94,8 +94,31 @@ struct GameSnapshot {
     int32_t cheated_count = 0;
 };
 
+// Live state for the F3 diagnostics panel (src/ui/diag_overlay.cpp).
+struct DiagSnapshot {
+    bool valid = false;
+    float pos[3] = {};
+    float heading_deg = 0.0f;  // GTA convention: 0 = north (+y), counter-clockwise
+    int area = 0;
+    float health = 0.0f;
+    float armour = 0.0f;
+    int32_t money = 0;
+    int clock_hour = 0;
+    int clock_minute = 0;
+    struct Weapon { int type = 0; int clip = 0; int total = 0; };
+    Weapon weapons[10];
+    int weapon_count = 0;
+    bool in_vehicle = false;
+    int vehicle_model = -1;
+    float vehicle_speed_kmh = 0.0f;
+    float vehicle_health = 0.0f;
+    int peds_used = 0, peds_cap = 0;
+    int vehicles_used = 0, vehicles_cap = 0;
+};
+
 class LCSTrainer {
 public:
+    DiagSnapshot read_diag() const;
     static LCSTrainer& instance();
 
     void attach(const lcs::cpu::ElfImage& image_game, lcs::cpu::DynarmicCore& cpu);

@@ -42,6 +42,7 @@
 #include "game/lcs_prompts.h"
 #include "game/lcs_ps2_effects.h"
 #include "game/lcs_trainer.h"
+#include "game/lcs_popin_probe.h"
 #include "game/lcs_world_hd.h"
 #include "settings/settings.h"
 #include "ui/global_menu.h"
@@ -2836,6 +2837,46 @@ int main(int argc, char* argv[]) {
                                     s_vstage = 102; s_vframes = 0;
                                 }
                             }
+                        } else if (s_vstage == 102 && std::getenv("LCS_DIAG_POPIN")) {
+                            s_vstage = 300; s_vframes = 0;
+                        } else if (s_vstage >= 300 && s_vstage < 400) {
+                            // Pop-in probe: stand at fixed spots at noon, count what appears (lcs_popin_probe.h)
+                            struct PopinSpot { const char* name; float x, y, z; };
+                            static constexpr PopinSpot kSpots[] = {
+                                {"stmarks", 1195.8f, -348.8f, 24.8f},
+                                {"chinatown", 900.8f, -740.0f, 14.8f},
+                                {"bank", 1050.8f, -420.0f, 14.8f},
+                            };
+                            constexpr double kSettleSec = 4.0, kMeasureSec = 40.0;
+                            static std::chrono::steady_clock::time_point s_spot_t0;
+                            static bool s_probe_init = false;
+                            auto& probe = lcs::game::PopinProbe::instance();
+                            if (!s_probe_init) { probe.init(image_game); s_probe_init = true; }
+                            const int spot = s_vstage - 300;
+                            if (spot >= static_cast<int>(std::size(kSpots))) {
+                                std::cout << "  [VerifyDone] Pop-in probe complete.\n" << std::flush;
+                                break;
+                            }
+                            if (s_vframes == 1) {
+                                tr.set_time_of_day(12);
+                                tr.set_weather(0);
+                                tr.teleport_to(kSpots[spot].x, kSpots[spot].y, kSpots[spot].z, kSpots[spot].name);
+                                s_spot_t0 = std::chrono::steady_clock::now();
+                            }
+                            tr.enqueue_cpu_action([&probe]() {
+                                if (auto* gcpu = lcs::cpu::DynarmicCore::current()) probe.tick(*gcpu);
+                            });
+                            static bool s_settled = false;
+                            const double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_spot_t0).count();
+                            if (s_vframes > 1 && !s_settled && el >= kSettleSec) {
+                                probe.report(std::string(kSpots[spot].name) + "-settle", el);
+                                s_settled = true;
+                            }
+                            if (s_settled && el >= kSettleSec + kMeasureSec) {
+                                probe.report(kSpots[spot].name, kMeasureSec);
+                                s_settled = false;
+                                ++s_vstage; s_vframes = 0;
+                            }
                         } else if (s_vstage == 102 && std::getenv("LCS_DIAG_CRUISE")) {
                             s_vstage = 200; s_vframes = 0;
                         } else if (s_vstage == 200) {
@@ -3111,6 +3152,20 @@ int main(int argc, char* argv[]) {
                                 }
                             }
 
+                            static const bool s_popin_drive = (std::getenv("LCS_DIAG_POPIN_DRIVE") != nullptr);
+                            static auto s_drive_t0 = std::chrono::steady_clock::now();
+                            if (s_popin_drive) {
+                                static bool s_drive_probe_init = false;
+                                auto& probe = lcs::game::PopinProbe::instance();
+                                if (!s_drive_probe_init) {
+                                    probe.init(image_game);
+                                    s_drive_probe_init = true;
+                                    s_drive_t0 = std::chrono::steady_clock::now();
+                                }
+                                tr.enqueue_cpu_action([&probe]() {
+                                    if (auto* gcpu = lcs::cpu::DynarmicCore::current()) probe.tick(*gcpu);
+                                });
+                            }
                             const bool cell_changed = (cx != s_last_cx || cy != s_last_cy);
                             if (std::getenv("LCS_DIAG_AUDIT") && (s_vframes % 40 == 0)) {
                                 const uint64_t vp_got = *reinterpret_cast<const uint64_t*>(image_game.get_load_bias() + 0x7f9720ULL);
@@ -3215,6 +3270,10 @@ int main(int argc, char* argv[]) {
                                 inp.queue_joy_button_up(0, 0);
                                 inp.queue_joy_button_up(0, 2);
                                 inp.set_kb_axes(0.0f, 0.0f, 0.0f, 0.0f);
+                                if (s_popin_drive) {
+                                    lcs::game::PopinProbe::instance().report("drive", std::chrono::duration<double>(
+                                        std::chrono::steady_clock::now() - s_drive_t0).count());
+                                }
                                 std::cout << "  [VerifyDone] Cruise complete. peak_ms=" << s_peak_ms
                                           << " min_ms=" << s_min_ms << " cell_caps=" << s_cap_idx << "\n" << std::flush;
                                 break;

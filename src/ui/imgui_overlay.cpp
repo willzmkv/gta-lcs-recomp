@@ -8,6 +8,7 @@
 #include "input/input_system.h"
 #include "input/pc_controls.h"
 #include "settings/settings.h"
+#include "ui/diag_overlay.h"
 #include "ui/global_menu.h"
 #include "ui/ui_assets.h"
 #include "ui/ui_theme.h"
@@ -550,6 +551,15 @@ bool handle_win32_message(void* hwnd, uint32_t msg, uintptr_t wparam, intptr_t l
             lcs::graphics::set_menu_active(blocking);
             return true;
         }
+        // F3: diagnostics panel; Ctrl+F3 copies the player's coordinates
+        if (wparam == VK_F3 && tr.is_in_gameplay()) {
+            if (GetKeyState(VK_CONTROL) & 0x8000) {
+                lcs::ui_diag::copy_position(hwnd);
+            } else {
+                lcs::ui_diag::toggle();
+            }
+            return true;
+        }
         if (wparam == VK_F6 && tr.is_in_gameplay()) {
             auto& mtr = lcs::game::LCSTrainer::instance();
             mtr.free_camera = !mtr.free_camera;
@@ -587,7 +597,7 @@ bool has_visible_overlay() {
     if (lcs::subtitles::has_active_items()) return true;
     const auto& tr = lcs::game::LCSTrainer::instance();
     if (!tr.is_in_gameplay()) return false;
-    return !tr.notices().empty() || lcs::settings::get().display_fps_counter > 0;
+    return !tr.notices().empty() || lcs::settings::get().display_fps_counter > 0 || lcs::ui_diag::is_open();
 }
 
 void feed_gamepad_navigation_to_imgui(ImGuiIO& io) {
@@ -681,6 +691,10 @@ void render_d3d12(ID3D12GraphicsCommandList* cmd_list) {
     ui::drawNotices();
     if (!in_main_menu || ui::globalMenuOpen()) {
         draw_fps_counter();
+    }
+    lcs::ui_diag::record_frame(io.DeltaTime);
+    if (!ui::globalMenuOpen() && !in_main_menu) {
+        lcs::ui_diag::draw();
     }
 
     // Sync window cursor / input lock if the menu closed itself via ESC / Continuar

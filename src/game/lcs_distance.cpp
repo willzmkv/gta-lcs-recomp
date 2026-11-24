@@ -344,6 +344,19 @@ struct LcsDistance::HookOps {
 };
 
 constexpr uint64_t kGotRecordNodeIndexesInCircleRva = 0x804ff0ULL;
+constexpr uint64_t kGotGeneratePedCreationCoorsRva  = 0x804ff8ULL;
+
+// `mov w8, #<hi16>, lsl #16` holding `value` (low 16 mantissa bits dropped)
+uint32_t mov_w8_float(float value) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return 0x52a00008u | (((bits >> 16) & 0xffffu) << 5);
+}
+
+float env_float(const char* name, float fallback) {
+    if (const char* e = std::getenv(name); e && *e) return static_cast<float>(std::atof(e));
+    return fallback;
+}
 
 uint64_t record_nodes_post_sample(uint64_t total_u, uint64_t orig_out_addr, uint64_t orig_max_u, uint64_t tmp_addr) {
     const int32_t count = static_cast<int32_t>(total_u);
@@ -991,6 +1004,42 @@ void LcsDistance::install(const lcs::cpu::ElfImage& image_game, lcs::cpu::Dynarm
         }
     }
 
+    // 12. CPathFind::GeneratePedCreationCoors(x, y, minDist, maxDist, minDistOffScreen, maxDistOffScreen, ...):
+    //     floor the in-view range (s2/s3) so peds never materialise in plain sight near the player;
+    //     the off-screen range (s4/s5, behind the camera) is left to the game.
+    {
+#if defined(LCS_PLATFORM_WINDOWS)
+        auto* page = static_cast<uint8_t*>(VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+#else
+        auto* page = static_cast<uint8_t*>(std::aligned_alloc(4096, 0x1000));
+#endif
+        if (page) {
+            std::memset(page, 0, 0x1000);
+            const uint64_t page_va = reinterpret_cast<uint64_t>(page);
+            const uint64_t stub_va = page_va + 0x20ULL;
+            const uint64_t orig = patch_got_slot(cpu, m_load_bias, kGotGeneratePedCreationCoorsRva, stub_va, image_game,
+                                                 "_ZN9CPathFind24GeneratePedCreationCoorsEffffffP7CVectorPiS2_PfP7CMatrix");
+            if (orig) {
+                *reinterpret_cast<uint64_t*>(page) = orig;
+                static constexpr uint32_t kCode[] = {
+                    0x10FFFF10u, // adr  x16, page (stub - 0x20)
+                    0xBD400A10u, // ldr  s16, [x16, #8]     in-view min floor
+                    0x1E304842u, // fmax s2, s2, s16
+                    0xBD400E11u, // ldr  s17, [x16, #12]    in-view span
+                    0x1E312851u, // fadd s17, s2, s17
+                    0x1E314863u, // fmax s3, s3, s17
+                    0xF9400210u, // ldr  x16, [x16]         original
+                    0xD61F0200u, // br   x16
+                };
+                std::memcpy(page + 0x20, kCode, sizeof(kCode));
+                cpu.invalidate_cache(page_va, 0x40);
+                m_ped_inview_floor = reinterpret_cast<float*>(page + 0x08);
+                m_ped_inview_floor[0] = 0.0f;  // set by sync_spawn_distances()
+                m_ped_inview_floor[1] = 0.0f;
+            }
+        }
+    }
+
     // [TMP_PHASE_PROBE] Sub-frame phase profiler active ONLY under LCS_DIAG_AUDIT=1
     if (std::getenv("LCS_DIAG_AUDIT") != nullptr) {
         struct ProbeSpec { uint64_t got_rva; const char* name; };
@@ -1238,6 +1287,7 @@ void LcsDistance::install(const lcs::cpu::ElfImage& image_game, lcs::cpu::Dynarm
     cpu.invalidate_cache(base_va, 0x4000);
     m_installed = true;
     update_330m_patches(compute_view_scale());
+    sync_spawn_distances();
     apply_cull_fade_overrides(m_load_bias, compute_detail_scale(), lcs::settings::get().detail_distance);
     std::cout << "  [Distance] Installed view/detail/population/pool hooks (330m & 100m dyn clamps lifted, CullFade unlocked).\n";
 }
@@ -1339,6 +1389,7 @@ void LcsDistance::sync_settings_now() {
         sp[5] = 0.1f;
     }
     update_330m_patches(view_scale);
+    sync_spawn_distances();
     apply_cull_fade_overrides(m_load_bias, detail_scale, lcs::settings::get().detail_distance);
 
     // Keep game's built-in Graphics Detail preference pinned to High (2) so GetDrawDistance() stays 1.0f
@@ -1705,6 +1756,38 @@ void LcsDistance::on_scan_world_post() {
     }
 }
 
+// Where new peds and cars may appear. In view they must appear far enough not to be seen
+// materialising (with the extended draw distance a car popping up 120 m ahead is obvious);
+// out of view (behind the camera) the game's own short distances stay. Population distance
+// below 50 keeps the game's values.
+void LcsDistance::sync_spawn_distances() {
+    if (!m_cpu || !m_load_bias) return;
+    const int pop = lcs::settings::get().population_distance;
+    const float t = std::clamp((pop - 50) / 50.0f, 0.0f, 1.0f);
+    const bool extended = pop >= 50;
+    // GenerateOneRandomCar's in-view spawn distance = speed factor (0.65..1.33) x gen x base;
+    // GenerateCarCreationCoors only finds road nodes inside the search radius.
+    const float car_base = env_float("LCS_CAR_INVIEW_BASE", 185.0f);
+    const float car_radius = env_float("LCS_CAR_NODE_RADIUS", 380.0f);
+    const float ped_min = env_float("LCS_PED_INVIEW_MIN", extended ? 110.0f + 50.0f * t : 0.0f);
+    if (std::fabs(car_base - m_applied_car_inview) >= 1.0f) {
+        const uint32_t insn = mov_w8_float(car_base);
+        patch_mem(*m_cpu, m_load_bias + 0x3b2a0cULL, &insn, sizeof(uint32_t));
+        patch_mem(*m_cpu, m_load_bias + 0x3b2aa8ULL, &insn, sizeof(uint32_t));
+        patch_mem(*m_cpu, m_load_bias + 0x3b2af0ULL, &insn, sizeof(uint32_t));
+        m_applied_car_inview = car_base;
+    }
+    if (std::fabs(car_radius - m_applied_car_node_radius) >= 1.0f) {
+        const uint32_t insn = mov_w8_float(car_radius);
+        patch_mem(*m_cpu, m_load_bias + 0x3cea00ULL, &insn, sizeof(uint32_t));
+        m_applied_car_node_radius = car_radius;
+    }
+    if (m_ped_inview_floor) {
+        m_ped_inview_floor[0] = ped_min;
+        m_ped_inview_floor[1] = ped_min > 0.0f ? 60.0f : 0.0f;
+    }
+}
+
 void LcsDistance::update_330m_patches(float view_scale) {
     auto* cur_cpu = lcs::cpu::DynarmicCore::current();
     auto* cpu = cur_cpu ? cur_cpu : m_cpu;
@@ -1734,13 +1817,11 @@ void LcsDistance::update_330m_patches(float view_scale) {
         // 100->240 candidate nodes) and GeneratePedCreationCoors (+120m->+220m circle margin,
         // 150->236 candidate nodes), and raise CCarCtrl::GenerateOneRandomCar close-spawn mins
         // (40m/55m -> 100..115m, 140m*s10 -> 185m*s10) so cars never pop in nearby.
-        const uint32_t car_search_380 = 0x52a877c8u; // 0x3cea00: mov w8, #0x43be, lsl #16 (380.0f)
         const uint32_t car_cmp_240    = 0x7103c11fu; // 0x3ceae0: cmp w8, #0xf0
         const uint32_t car_mov_240    = 0x52801e09u; // 0x3ceae4: mov w9, #0xf0
         const uint32_t ped_margin_220 = 0x52a86b88u; // 0x3cf19c: mov w8, #0x435c, lsl #16 (220.0f)
         const uint32_t ped_cmp_236    = 0x7103b11fu; // 0x3cf270: cmp w8, #0xec
         const uint32_t ped_mov_236    = 0x52801d8au; // 0x3cf274: mov w10, #0xec
-        patch_mem(*cpu, m_load_bias + 0x3cea00ULL, &car_search_380, sizeof(uint32_t));
         patch_mem(*cpu, m_load_bias + 0x3ceae0ULL, &car_cmp_240,    sizeof(uint32_t));
         patch_mem(*cpu, m_load_bias + 0x3ceae4ULL, &car_mov_240,    sizeof(uint32_t));
         patch_mem(*cpu, m_load_bias + 0x3cf19cULL, &ped_margin_220, sizeof(uint32_t));
@@ -1748,13 +1829,9 @@ void LcsDistance::update_330m_patches(float view_scale) {
         patch_mem(*cpu, m_load_bias + 0x3cf274ULL, &ped_mov_236,    sizeof(uint32_t));
 
         const uint32_t car_pitch_100  = 0x52a85909u; // 0x3b2940: mov w9, #0x42c8, lsl #16 (100.0f vs 55.0f)
-        const uint32_t car_norm_185   = 0x52a86728u; // 0x3b2a0c/aa8/af0: mov w8, #0x4339, lsl #16 (185.0f vs 140.0f)
         const uint32_t car_slow_105   = 0x52a85a49u; // 0x3b2b28: mov w9, #0x42d2, lsl #16 (105.0f vs 40.0f)
         const uint32_t car_fast_115   = 0x52a85cc9u; // 0x3b2b48: mov w9, #0x42e6, lsl #16 (115.0f vs 40.0f)
         patch_mem(*cpu, m_load_bias + 0x3b2940ULL, &car_pitch_100, sizeof(uint32_t));
-        patch_mem(*cpu, m_load_bias + 0x3b2a0cULL, &car_norm_185,  sizeof(uint32_t));
-        patch_mem(*cpu, m_load_bias + 0x3b2aa8ULL, &car_norm_185,  sizeof(uint32_t));
-        patch_mem(*cpu, m_load_bias + 0x3b2af0ULL, &car_norm_185,  sizeof(uint32_t));
         patch_mem(*cpu, m_load_bias + 0x3b2b28ULL, &car_slow_105,  sizeof(uint32_t));
         patch_mem(*cpu, m_load_bias + 0x3b2b48ULL, &car_fast_115,  sizeof(uint32_t));
 

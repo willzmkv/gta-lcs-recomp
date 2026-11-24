@@ -9,6 +9,13 @@ Todas são lidas por `lcs.exe` (`src/core/main.cpp`, salvo indicação).
 | `LCS_HIDDEN_WINDOW=1` | Janela e swapchain criadas mas **nunca exibidas** (sem tela cheia, sem foco). Use sempre em testes automáticos: o usuário não pode ver a janela (`src/graphics/window.cpp`) |
 | `LCS_TEX_WORKERS=N` | Threads do pipeline de texturas; `0` = decode síncrono antigo (A/B). Padrão: metade das threads de hardware, 2..8 (`src/graphics/texture_pipeline.h`) |
 | `LCS_TEX_CACHE_MB=N` | Orçamento do cache de texturas decodificadas (padrão 256, `0` = desligado) |
+| `LCS_DIAG_F3=1` | Abre o painel F3 já na partida (capturas automáticas) |
+| `LCS_DIAG_POPIN=1` | Com `CRUISE`: parado ao meio-dia em 3 pontos, 40 s cada, conta entidades novas por distância e visão (`[Popin]`, `src/game/lcs_popin_probe.*`) |
+| `LCS_DIAG_POPIN_DRIVE=1` | A mesma contagem durante o trecho dirigindo do cruzeiro |
+| `LCS_DIAG_WHD_DUMP=1` | Grava as listas das células do HD World em `scratch/whd_lists_N.csv` (analisar com `tools/whd_lists_analyze.py`) |
+| `LCS_WHD_LQ_RULE=0` | Desliga a regra de substituição LQ (A/B) |
+| `LCS_PED_INVIEW_MIN=m` | Piso da distância de spawn de pedestres na visão (padrão 110..160 m conforme a distância de população) |
+| `LCS_CAR_INVIEW_BASE=b`, `LCS_CAR_NODE_RADIUS=r` | Base do spawn de carros na visão (185) e raio de busca de nós (380) — 280/520 esvaziou as ruas |
 | `LCS_DIAG_VERIFY=1` | Liga o rig automático: navega menus, tira capturas em `scratch/verify_*.bmp`, sai sozinho. Sem ela, `main.cpp:114` segue o fluxo normal |
 | `LCS_DIAG_CRUISE=1` | Com `VERIFY`: inicia jogo, põe o jogador num Kuruma e percorre a rota de Portland com teletransportes; capturas `scratch/cruise_*.bmp`; termina com `[VerifyDone] Cruise complete. peak_ms= min_ms= cell_caps=` |
 | `LCS_DIAG_CRUISE_FRAMES=N` | Duração da etapa de direção (padrão 620, mínimo 61) |
@@ -36,6 +43,8 @@ Remove-Item Env:LCS_HIDDEN_WINDOW, Env:LCS_DIAG_VERIFY, Env:LCS_DIAG_CRUISE, Env
 **Regras:** rode sempre com `LCS_HIDDEN_WINDOW=1` (o usuário não deve ver a janela). Não rode
 enquanto o usuário estiver jogando. O rig injeta teclas só na própria janela
 (`SendMessage`), nunca globalmente. O rig respeita o `lcs.ini` do usuário.
+
+**Em jogo:** F3 abre o painel de diagnóstico (desempenho, HD World, posição, direção, armas, veículo, pools); Ctrl+F3 copia `x, y, z, direção` e grava `[F3]` no log.
 
 ## 2. Tags úteis no log
 
