@@ -1770,8 +1770,8 @@ void LcsDistance::sync_spawn_distances() {
     // GenerateOneRandomCar keeps a car spawned in view only inside [130, 190] x f from the player
     // (f = speed factor x gen; 0x3b3af0 / 0x3b3ac0) and >= 105 x f from the camera (0x3b3b08):
     // the in-view base (140, 185 before) must move with that window or every car is discarded.
-    const float car_base = env_float("LCS_CAR_INVIEW_BASE", extended ? 185.0f + 75.0f * t : 185.0f);
-    const float car_radius = env_float("LCS_CAR_NODE_RADIUS", extended ? 380.0f + 120.0f * t : 380.0f);
+    const float car_base = env_float("LCS_CAR_INVIEW_BASE", 185.0f);
+    const float car_radius = env_float("LCS_CAR_NODE_RADIUS", 380.0f);
     // No floor by default: the game already spawns peds in view >= ~90 m, and a floor (even 100 m)
     // emptied the pavements near the player by 35-60% (pop-in probe, 2026-11-24).
     const float ped_min = env_float("LCS_PED_INVIEW_MIN", 0.0f);

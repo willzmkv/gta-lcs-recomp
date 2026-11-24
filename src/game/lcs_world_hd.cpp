@@ -2223,12 +2223,24 @@ void LcsWorldHd::rebuild_combined_chunk(uint64_t ws_ptr) {
                 *reinterpret_cast<uint16_t*>(write_ptr) = raw_id & 0x7fffu;
                 if ((dx != 0.0f || dy != 0.0f) &&
                     *reinterpret_cast<const uint64_t*>(write_ptr + 0x30ULL) == 0ULL) {
-                    // The position (+0x68) is relative to the record's cell; the bounding sphere
-                    // (+0x04, fp16) is in world coordinates, identical in every list that holds
-                    // the record, so it must not be moved (moving it made frustum culling drop
-                    // visible HD buildings).
                     *reinterpret_cast<float*>(write_ptr + 0x68ULL) += dx;
                     *reinterpret_cast<float*>(write_ptr + 0x6cULL) += dy;
+                    // The fp16 sphere is the same in every list, but Render() reads it in the
+                    // current cell's frame: it moves with the position. (Not moving it lost the
+                    // St Mark's safehouse door and HD shop fronts, 2026-11-24.)
+                    static const bool s_shift_sphere = [] {
+                        const char* e = std::getenv("LCS_WHD_SPHERE_SHIFT");
+                        return !(e && e[0] == '0');
+                    }();
+                    if (s_shift_sphere) {
+                        uint16_t hcx = 0, hcy = 0;
+                        std::memcpy(&hcx, write_ptr + 0x04ULL, sizeof(uint16_t));
+                        std::memcpy(&hcy, write_ptr + 0x06ULL, sizeof(uint16_t));
+                        hcx = f32_to_f16(f16_to_f32(hcx) + dx);
+                        hcy = f32_to_f16(f16_to_f32(hcy) + dy);
+                        std::memcpy(write_ptr + 0x04ULL, &hcx, sizeof(uint16_t));
+                        std::memcpy(write_ptr + 0x06ULL, &hcy, sizeof(uint16_t));
+                    }
                 }
                 write_ptr += kGeomInstSize;
                 ++total_count;
