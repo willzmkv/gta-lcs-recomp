@@ -15,5 +15,7 @@ namespace lcs::game {
 //    CVehicle::ProcessBikeWheel so Square footbraking retains front car steering bite and bikes
 //    slow down smoothly without rear-wheel snap oversteer or flipping.
 void install_physics_timing_hooks(const lcs::cpu::ElfImage& image_game, lcs::cpu::DynarmicCore& cpu);
+// Once per frame: advances fixed-rate (30 Hz) effects such as the LED ticker signs.
+void tick_fixed_rate_effects();
 
 } // namespace lcs::game

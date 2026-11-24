@@ -3621,6 +3621,7 @@ int main(int argc, char* argv[]) {
                 lcs::game::LCSPs2Effects::instance().update(dt);
                 lcs::game::LcsWorldHd::instance().on_frame(rendered_frames);
                 lcs::game::LCSTrainer::instance().tick(dt);
+                lcs::game::tick_fixed_rate_effects();
                 if (lcs::game::LCSTrainer::instance().consume_quit_request()) {
                     std::cout << "  [GlobalMenu] Quit to Windows requested.\n" << std::flush;
                     break;

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <chrono>
 #include <cstring>
 #include <iostream>
 
@@ -76,6 +77,25 @@ float compute_frame_scale(uint64_t timestep_ptr_va) {
 }
 
 } // namespace
+
+namespace {
+volatile uint32_t* g_scrollbar_tick = nullptr;
+} // namespace
+
+void tick_fixed_rate_effects() {
+    // Sets the CScrollBar tick on frames where a 1/30 s step elapsed (at most one per frame).
+    if (!g_scrollbar_tick) return;
+    using Clock = std::chrono::steady_clock;
+    static Clock::time_point s_next = Clock::now();
+    const auto now = Clock::now();
+    if (now >= s_next) {
+        *g_scrollbar_tick = 1;
+        s_next += std::chrono::microseconds(33333);
+        if (now - s_next > std::chrono::milliseconds(200)) s_next = now;  // after a stall
+    } else {
+        *g_scrollbar_tick = 0;
+    }
+}
 
 void install_physics_timing_hooks(const lcs::cpu::ElfImage& image_game, lcs::cpu::DynarmicCore& cpu) {
     static const bool s_enabled = [] {
@@ -367,6 +387,71 @@ void install_physics_timing_hooks(const lcs::cpu::ElfImage& image_game, lcs::cpu
 
     cpu.invalidate_cache(base_addr, 0x2000);
     std::cout << "  - Installed vehicle physics timing & braking lateral-grip hooks.\n";
+
+    // CScrollBar::Update (LED ticker signs): a per-instance frame counter scrolls the text one
+    // column every 8 calls, tuned for 30 fps (4x too fast at 120 fps). Its GOT slot points to a
+    // stub that runs the original only on frames where the 30 Hz tick (scrollbar_tick) is set.
+    {
+#if defined(LCS_PLATFORM_WINDOWS)
+        auto* page = static_cast<uint8_t*>(VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+#else
+        auto* page = static_cast<uint8_t*>(std::aligned_alloc(4096, 0x1000));
+#endif
+        if (page) {
+            std::memset(page, 0, 0x1000);
+            const uint64_t page_va = reinterpret_cast<uint64_t>(page);
+            const uint64_t load_bias = image_game.get_load_bias();
+            const uint64_t orig = patch_got(cpu, load_bias, 0x806828ULL, page_va + 0x10, image_game,
+                                            "_ZN10CScrollBar6UpdateEv");
+            if (orig) {
+                *reinterpret_cast<uint64_t*>(page) = orig;
+                static constexpr uint32_t kStub[] = {
+                    0x10FFFF90u, // adr  x16, page
+                    0xB9400A11u, // ldr  w17, [x16, #8]   tick flag
+                    0x34000071u, // cbz  w17, ret
+                    0xF9400210u, // ldr  x16, [x16]       original
+                    0xD61F0200u, // br   x16
+                    0xD65F03C0u, // ret
+                };
+                std::memcpy(page + 0x10, kStub, sizeof(kStub));
+                cpu.invalidate_cache(page_va, 0x40);
+                g_scrollbar_tick = reinterpret_cast<volatile uint32_t*>(page + 0x08);
+                *g_scrollbar_tick = 1;
+                std::cout << "  - Applied 30 Hz CScrollBar::Update (LED ticker signs).\n";
+            }
+        }
+    }
+
+    // CClouds::Update: IndividualRotation += 60 * (0.3 + wind * timestep * 0.5) every frame. The
+    // 0.3 is per frame (tuned for 30 fps), so clouds spun ~4x faster at 120 fps. Rewritten as
+    // 60 * timestep * (wind * 0.5 + 0.18): the same rotation at 30 fps (timestep 1.667), and
+    // frame-rate independent.
+    if (const uint64_t upd = image_game.find_symbol("_ZN7CClouds6UpdateEv")) {
+        auto* code = reinterpret_cast<uint32_t*>(upd);
+        // Offsets from CClouds::Update: +0xb8/+0xbc load 0.3 into w9, +0xd4..+0xe4 combine it.
+        const uint32_t* p = code + (0xb8 / 4);
+        const bool layout_ok = p[0] == 0x52933349u && p[1] == 0x72a7d329u &&        // mov/movk w9, 0.3
+                               code[0xd4 / 4] == 0x1e210841u &&                      // fmul s1, s2, s1
+                               code[0xd8 / 4] == 0x1e270122u &&                      // fmov s2, w9
+                               code[0xe4 / 4] == 0x1f030821u;                        // fmadd s1, s1, s3, s2
+        if (layout_ok) {
+            const uint32_t mov_w9 = code[0xdc / 4];   // mov w9, #60.0
+            const uint32_t ldr_s4 = code[0xe0 / 4];   // ldr s4, [x8]
+            const uint32_t consts[2] = {0x528a3d89u, 0x72a7c709u};  // w9 = 0.18f
+            const uint32_t combine[5] = {
+                0x1e270124u, // fmov  s4, w9          s4 = 0.18
+                0x1f031042u, // fmadd s2, s2, s3, s4  s2 = wind * 0.5 + 0.18
+                mov_w9,      // mov   w9, #60.0
+                0x1e210841u, // fmul  s1, s2, s1      s1 = (wind * 0.5 + 0.18) * timestep
+                ldr_s4,      // ldr   s4, [x8]        IndividualRotation (moved after its use)
+            };
+            patch_bytes(cpu, upd + 0xb8, consts, sizeof(consts));
+            patch_bytes(cpu, upd + 0xd4, combine, sizeof(combine));
+            std::cout << "  - Applied frame-rate independent CClouds::Update rotation.\n";
+        } else {
+            std::cerr << "  [PhysicsTiming] CClouds::Update layout differs; clouds fix not applied.\n";
+        }
+    }
 #else
     (void)image_game; (void)cpu;
 #endif
