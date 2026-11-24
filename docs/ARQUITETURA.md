@@ -63,8 +63,9 @@ O log imprime cada etapa como `[Step N]`:
 
 - **Dynarmic** (`src/cpu/dynarmic_core.cpp`): fastmem com ponteiro base 0 (acesso direto à
   memória host), acessos inválidos tratados por SEH, sem contagem de ciclos, `CNTPCT` real.
-  Otimizações *unsafe* de FP **não** estão ligadas. A biblioteca vem de
-  `DYNARMIC_ROOT = D:/Games/Lichii-nx2/Lichii-nx2` (`CMakeLists.txt:201`).
+  Otimizações *unsafe* de FP **não** estão ligadas. Vendorizado em `third_party/dynarmic`
+  (upstream 6.7.0, azahar-emu; patch local de reentrância em `Run()`/`Step()`, ver
+  `VENDORED.md`), só o frontend A64 é compilado.
 - **Uma thread guest = uma thread host** (`src/os/thread_manager.cpp`), cada uma com seu core
   Dynarmic, pilha e TLS. Mutex/condvar/semáforo guest são mapeados para primitivas host por
   endereço.
@@ -74,8 +75,9 @@ O log imprime cada etapa como `[Step N]`:
 - **Thread única para lógica + render:** `requestEnableGameTickThread` foi desviado para o
   ramo "disable" (`src/game/lcs_distance.cpp:1761-1768`). Motivo e consequências em
   [PERFORMANCE.md §4](PERFORMANCE.md#4-decisão-em-vigor-lógica-e-render-numa-thread-só).
-- O host **não** tem pools de workers para decode/upload; só o driver de gamepad
-  (`src/input/gamepad.cpp:590`) cria thread própria.
+- Threads próprias do host: o pool `TexDecode0..N` do pipeline de texturas
+  (`src/graphics/texture_pipeline.cpp`, ¼ das threads de hardware, 2..4) e o driver de
+  gamepad (`src/input/gamepad.cpp`).
 
 ### Chamando código do jogo a partir do host
 
@@ -109,8 +111,10 @@ Toda RVA vem de disassembly do `libGame.so` (llvm-objdump; os dumps usados estã
   (`src/graphics/r_vulkan/*.cpp` têm poucas linhas).
 - Shaders GLSL ES do jogo são traduzidos em `shader_compiler.cpp`.
 - Texturas PVRTC/DXT/ETC são **decodificadas para RGBA8 na CPU** (`decode_pvrtc_rgba8`,
-  `decode_compressed_to_rgba8`) e enviadas por um anel de upload de 96 MB por quadro
-  (3 quadros em voo, `kFrameCount = 3`).
+  `decode_compressed_to_rgba8`) em workers do `TexturePipeline` (cache por hash de conteúdo,
+  recurso D3D12 obtido no próprio worker, pool de recursos por tamanho) e enviadas por um anel
+  de upload de 96 MB por quadro (3 quadros em voo, `kFrameCount = 3`). Ver
+  [PERFORMANCE.md §5 P1](PERFORMANCE.md#p1--pipeline-de-texturas-assíncrono-stutters-1-e-2).
 - `lcs_batched_fast.cpp` substitui `BatchedWorld::C_WorldRenderManager::Render` e
   `BatchedModel::C_DeferredBatchManager::Render` por código x64 que chama o `RenderBridge`
   direto (sem JIT, sem buscas em árvore por draw, sem binds redundantes).
@@ -163,5 +167,14 @@ python tools/build.py --clean       # apaga build/ antes
 ```
 
 CMake + Visual Studio (MSVC/clang-cl), C++20. Opções em `CMakeLists.txt`: `ENABLE_D3D12`,
-`ENABLE_VULKAN`, `ENABLE_LTO`, `ENABLE_TESTS`. Dependências em `third_party/` (ImGui, stb) e
-Dynarmic externo (seção 3).
+`ENABLE_VULKAN`, `ENABLE_LTO` (padrão do `build.py`; `--quick` desliga), `ENABLE_TESTS`.
+
+Todas as dependências estão em `third_party/` e são compiladas a partir do código-fonte —
+nada fora do repositório:
+
+| Dependência | Versão | Uso |
+|---|---|---|
+| `dynarmic/` (+ fmt, mcl, xbyak, zydis, zycore, robin-map, oaknut) | 6.7.0, azahar-emu `a466015` | JIT ARM64 |
+| `boost/` (subconjunto header-only) | 1.92.0 | Requisito do Dynarmic (`icl`, `variant`) |
+| `SDL3/` | 3.4.20 | Gamepads, DualSense, áudio |
+| `imgui/`, `stb/` | — | Overlay/menus, imagens e fontes |

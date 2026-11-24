@@ -6,6 +6,9 @@ Todas são lidas por `lcs.exe` (`src/core/main.cpp`, salvo indicação).
 
 | Variável | Efeito |
 |---|---|
+| `LCS_HIDDEN_WINDOW=1` | Janela e swapchain criadas mas **nunca exibidas** (sem tela cheia, sem foco). Use sempre em testes automáticos: o usuário não pode ver a janela (`src/graphics/window.cpp`) |
+| `LCS_TEX_WORKERS=N` | Threads do pipeline de texturas; `0` = decode síncrono antigo (A/B). Padrão: metade das threads de hardware, 2..8 (`src/graphics/texture_pipeline.h`) |
+| `LCS_TEX_CACHE_MB=N` | Orçamento do cache de texturas decodificadas (padrão 256, `0` = desligado) |
 | `LCS_DIAG_VERIFY=1` | Liga o rig automático: navega menus, tira capturas em `scratch/verify_*.bmp`, sai sozinho. Sem ela, `main.cpp:114` segue o fluxo normal |
 | `LCS_DIAG_CRUISE=1` | Com `VERIFY`: inicia jogo, põe o jogador num Kuruma e percorre a rota de Portland com teletransportes; capturas `scratch/cruise_*.bmp`; termina com `[VerifyDone] Cruise complete. peak_ms= min_ms= cell_caps=` |
 | `LCS_DIAG_CRUISE_FRAMES=N` | Duração da etapa de direção (padrão 620, mínimo 61) |
@@ -25,13 +28,14 @@ Todas são lidas por `lcs.exe` (`src/core/main.cpp`, salvo indicação).
 Exemplo (PowerShell):
 
 ```powershell
-$env:LCS_DIAG_VERIFY="1"; $env:LCS_DIAG_CRUISE="1"; $env:LCS_DIAG_AUDIT="1"
+$env:LCS_HIDDEN_WINDOW="1"; $env:LCS_DIAG_VERIFY="1"; $env:LCS_DIAG_CRUISE="1"; $env:LCS_DIAG_AUDIT="1"
 .\lcs.exe *> scratch\audit_N.log
-Remove-Item Env:LCS_DIAG_VERIFY, Env:LCS_DIAG_CRUISE, Env:LCS_DIAG_AUDIT
+Remove-Item Env:LCS_HIDDEN_WINDOW, Env:LCS_DIAG_VERIFY, Env:LCS_DIAG_CRUISE, Env:LCS_DIAG_AUDIT
 ```
 
-O rig respeita o `lcs.ini` do usuário (não o sobrescreve). Não rode enquanto o usuário
-estiver jogando.
+**Regras:** rode sempre com `LCS_HIDDEN_WINDOW=1` (o usuário não deve ver a janela). Não rode
+enquanto o usuário estiver jogando. O rig injeta teclas só na própria janela
+(`SendMessage`), nunca globalmente. O rig respeita o `lcs.ini` do usuário.
 
 ## 2. Tags úteis no log
 

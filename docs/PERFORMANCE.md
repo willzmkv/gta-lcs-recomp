@@ -148,7 +148,51 @@ Priorizado por ganho perceptível / risco. Cada item deve ter chave de desligar
 
 ### P1 — Pipeline de texturas assíncrono (stutters 1 e 2)
 
-Multithreading + SIMD; maior ganho perceptível.
+**Etapa 1 implementada em 2026-11-24** (`src/graphics/texture_pipeline.*`,
+`src/graphics/r_d3d12/d3d12_backend.cpp`):
+
+- `glCompressedTexImage2D` só copia o payload comprimido e enfileira um job; um pool de
+  workers (`TexDecode0..N`, prioridade abaixo do normal) calcula um hash de conteúdo de 64 bits
+  em 4 trilhas independentes (ILP), consulta o cache LRU de texturas decodificadas (256 MB),
+  decodifica se necessário e já obtém o recurso D3D12 (do pool ou criado no próprio worker —
+  `ID3D12Device` é free-threaded).
+- A RenderThread anexa jobs prontos a cada flush de upload. Um draw que amostra uma textura
+  ainda pendente completa o job na hora (`lookup_tex_ready`), então nada é desenhado sem
+  conteúdo.
+- Pool de recursos RGBA8 por tamanho (256 MB): texturas aposentadas voltam ao pool depois da
+  fence do quadro em vez de serem destruídas e recriadas (`CreateCommittedResource` ≈ 0,8 ms).
+- Chaves: `LCS_TEX_WORKERS` (0 = caminho síncrono antigo), `LCS_TEX_CACHE_MB`.
+
+Resultado no rig de cruzeiro (build quick, janela oculta, quadros 100+, mesmo binário):
+
+| | síncrono (2 execuções) | pipeline, 8 workers | **pipeline, 4 workers (padrão)** |
+|---|---|---|---|
+| mediana | 12,75 / 12,77 ms | 13,69..14,08 ms | **12,92 ms** |
+| p99 | 39,7 / 34,3 ms | 22,7..25,7 ms | **23,5 ms** |
+| pior quadro | 269,7 / 91,9 ms | 36,9..39,4 ms | **44,0 ms** |
+| quadros > 50 ms | 9 / 3 | 0 | **0** |
+| quadros > 100 ms | 2 / 0 | 0 | **0** |
+| tempo de criação de textura na RenderThread | 309..327 ms | 31..41 ms | **38 ms** |
+
+Release com LTO (agora real), mesmo rig, quadros 100+:
+
+| | síncrono | pipeline (4 workers) |
+|---|---|---|
+| mediana | 12,85 ms | 13,33 ms |
+| p99 | 38,1 ms | **25,5 ms** |
+| pior quadro | 60,7 ms | **48,9 ms** |
+| quadros > 50 ms | 4 | **0** |
+
+O LTO quase não altera a mediana (~12,8 ms em quick e em LTO): o tempo dominante é o código
+do jogo no JIT, não o código do host. Os +0,5 ms de mediana com o pipeline estão perto do
+ruído entre execuções (0,0..0,5 ms nas medições), mas devem ser acompanhados.
+
+Por execução: ~6.670 texturas, ~240..250 servidas pelo cache, 2..12 esperas em draw,
+0..1 execução inline. Com 8 workers a mediana piorou ~1 ms (disputa de núcleo/SMT/cache com as
+threads do jogo); por isso o padrão é ¼ das threads (2..4).
+
+Pendente nesta prioridade (itens abaixo): decode vetorizado (SSE/AVX2), transcodificação
+para BC1/BC3 ou decode na GPU, destruição assíncrona, orçamento de upload por quadro.
 
 1. **Cache por conteúdo:** hash rápido (XXH3/FNV de 64 bits) dos bytes PVRTC → RGBA8 já
    decodificado (LRU limitado em RAM). Textura recarregada custa ~0,01 ms em vez de 2..3 ms.

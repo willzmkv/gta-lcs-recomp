@@ -30,10 +30,15 @@ Documentos relacionados:
   `D:\Games\vcs-agent`, `D:\Games\vcs-agent-build`, e o repositório
   <https://github.com/willzmkv/gta-vcs-recomp>.
 
-> **Atenção:** esta pasta **não é um repositório git**. Não há histórico nem como reverter
-> edições. Antes de mexer em código, recomenda-se `git init` com um `.gitignore` que exclua
-> `assets/`, `gtalcs/`, `modloader/`, `*.ipa`, `*.zip`, `*.7z`, `build/`, `scratch/`, `*.exe`
-> (combinar com o usuário antes).
+- **Git:** esta pasta é um clone de <https://github.com/willzmkv/gta-lcs-recomp> (`main`).
+  Os poucos arquivos versionados em `gtalcs/` e `modloader/` (metadados de port) estão
+  marcados `skip-worktree`, porque essas pastas são junctions para a instalação do usuário:
+  o git nunca lê nem escreve através delas. Não remova essa marcação e não faça
+  `git checkout`/`reset --hard` que toque nessas pastas.
+- **Dependências:** todas estão dentro do repositório (`third_party/`: Dynarmic, Boost
+  header-only, SDL3, ImGui, stb). Nunca aponte o CMake para pastas fora do repo.
+- **Testes:** rode sempre com `LCS_HIDDEN_WINDOW=1` — o usuário não pode ver a janela
+  (ver [DIAGNOSTICO.md](DIAGNOSTICO.md)).
 
 ## 2. O que aconteceu na sessão anterior
 
@@ -73,20 +78,21 @@ código foi feita depois do `audit4`.** A sessão parou sem resposta final ao us
 
 ## 3. Estado atual do binário e do código
 
-- `lcs.exe` (raiz, 2026-11-23 14:37) é um build **`--quick` (LTO desligado)** com a
-  instrumentação temporária `TMP_*` compilada. Ela só imprime com `LCS_DIAG_AUDIT=1`, mas o
-  build sem LTO é mais lento que o Release. **Para o usuário testar FPS, gere um Release:**
-  `python tools/build.py` (perfil `lto`).
-- A árvore `src/` corresponde a esse binário (último arquivo editado: `lcs_distance.cpp`
-  14:37; link 14:37:47).
+- `lcs.exe` (raiz, 2026-11-24 09:29) é um build **Release com LTO** (`python tools/build.py`)
+  que já inclui o P1. A instrumentação temporária `TMP_*` continua compilada, mas só imprime
+  com `LCS_DIAG_AUDIT=1`.
 - Instrumentação temporária ainda presente (remover antes de entregar): ver lista completa
   em [DIAGNOSTICO.md §3](DIAGNOSTICO.md#3-instrumentação-temporária-ainda-no-código).
 - `scratch/` tem ~430 arquivos (~1,7 GB): logs de auditoria, disassembly (`dis_*.txt`,
   `obj_*.txt`), capturas `cruise_*.bmp/png` e scripts. São artefatos do agente anterior; os
   mais úteis estão catalogados em DIAGNOSTICO.md §5. Podem ser apagados quando não forem
   mais necessários (o usuário decide).
-- Dependência externa: Dynarmic vem de `D:/Games/Lichii-nx2/Lichii-nx2`
-  (`CMakeLists.txt:201`, `DYNARMIC_ROOT`). Sem essa pasta o build falha.
+- **Corrigido em 2026-11-24:** Dynarmic (antes `D:/Games/Lichii-nx2`) e SDL3 (antes
+  `D:/Games/VCS Recomp`) agora são vendorizados em `third_party/` e compilados pelo
+  `tools/build.py`. O Dynarmic passou do fork v7 do Eden para o upstream 6.7.0
+  (azahar-emu), com um patch de reentrância documentado em `third_party/dynarmic/VENDORED.md`.
+- **Corrigido em 2026-11-24:** a opção `ENABLE_LTO` do CMake existia mas não fazia nada —
+  todo build "LTO" anterior era sem LTO. Agora liga `INTERPROCEDURAL_OPTIMIZATION` no `lcs`.
 - `lcs.ini` atual do usuário: `world.hd_radius=3`, `view_distance=100`,
   `detail_distance=100`, `population_distance=100`, densidades 100, `vsync=0`, `fps=0`.
 
@@ -94,7 +100,7 @@ código foi feita depois do `audit4`.** A sessão parou sem resposta final ao us
 
 | # | Problema | Situação | Causa medida | Detalhe |
 |---|---|---|---|---|
-| 1 | Stutters ao dirigir (30..175 ms) | **Aberto** | Decode PVRTC síncrono (~14 ms por Mpx, 1 thread) + `CreateCommittedResource` por textura (~0,75 ms cada) na RenderThread | PERFORMANCE.md §3.1 |
+| 1 | Stutters ao dirigir (30..175 ms) | **Resolvido no rig (P1, 2026-11-24)** — pior quadro 92..270 → 44 ms, zero > 50 ms; falta confirmação do usuário em jogo | Decode PVRTC síncrono (~14 ms por Mpx, 1 thread) + `CreateCommittedResource` por textura (~0,75 ms cada) na RenderThread | PERFORMANCE.md §3.1 e §5 P1 |
 | 2 | Hitch ao trocar de ilha (400..2300 ms) | **Aberto** | `LoadBigBuildingsWhenNeeded` → `LoadLevel` + `LoadAllRequestedModels` síncronos + rajada de 224..850 texturas | PERFORMANCE.md §3.3 |
 | 3 | FPS médio abaixo de 100 com tudo no máximo | **Aberto** | ~11 ms de código guest por quadro em uma única thread (lógica + render serializados) | PERFORMANCE.md §2 e §4 |
 | 4 | Picos do HD World (`step` 68..79 ms; `rebuild` 2..7 ms) | **Aberto** | Leitura/inflate/Fixup de células e reconstrução total do chunk combinado na thread do jogo | HD_WORLD.md §5 |
@@ -109,10 +115,10 @@ Ordem pensada para dar o maior ganho perceptível primeiro. Detalhes técnicos e
 
 1. **Baseline limpo.** Build Release (`python tools/build.py`), rodar cruzeiro com
    `LCS_DIAG_AUDIT=1` e guardar o log como referência. Comparar com `audit4.log` (build quick).
-2. **Pipeline de texturas fora da thread crítica (P1).** Pool de workers para decode PVRTC
-   (8+ threads disponíveis no Ryzen 7 5800X), cache por hash de conteúdo, recursos D3D12
-   *placed* em heaps pré-alocados com reciclagem, destruição assíncrona e orçamento de upload
-   por quadro em vez de `split_command_list_and_wait`. Ataca o problema 1 e boa parte do 2.
+2. ~~**Pipeline de texturas fora da thread crítica (P1).**~~ Etapa 1 feita em 2026-11-24
+   (workers, cache, pool de recursos). Restam: decode SIMD, BC1/BC3 ou decode na GPU,
+   destruição assíncrona, orçamento de upload. Medir também a troca de ilha (problema 2) com
+   uma rota que atravesse ilhas.
 3. **HD World assíncrono (P2).** Leitura + inflate das células em worker; reconstrução
    incremental do chunk combinado. Ataca o problema 4.
 4. **Despawn de veículos distantes (P2).** Forçar remoção de carros aleatórios/não-missão

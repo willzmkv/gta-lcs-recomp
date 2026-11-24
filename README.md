@@ -38,8 +38,9 @@ python tools/build.py --launcher  # LCSLauncher.exe
 .\LCSLauncher.exe                 # ou .\lcs.exe direto
 ```
 
-Requer Visual Studio com C++ (MSVC/clang-cl), CMake, Python 3 e o Dynarmic em
-`D:/Games/Lichii-nx2/Lichii-nx2` (`DYNARMIC_ROOT` no `CMakeLists.txt`).
+Requer Visual Studio com C++ (MSVC/clang-cl), CMake e Python 3. Todas as bibliotecas
+(Dynarmic, Boost header-only, SDL3, ImGui, stb) estão em `third_party/` e são compiladas pelo
+próprio build — nenhuma pasta externa é necessária.
 
 ## Estrutura
 
