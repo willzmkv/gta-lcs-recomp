@@ -97,3 +97,6 @@ CMakeUserPresets.json
 Thumbs.db
 .DS_Store
 /lcs_hudtext.log
+# Third-party fonts supplied locally (Pricedown Bl.otf): redistribution licence not checked
+/fonts/
+/src/Pricedown Bl.otf

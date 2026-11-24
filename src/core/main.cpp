@@ -2873,6 +2873,60 @@ int main(int argc, char* argv[]) {
                                     lcs::game::LcsWorldHd::instance().set_radius(rad);
                                 }
                             }
+                            // LCS_DIAG_HUDTIMER=1: an onscreen clock and counter (COnscreenTimer) on the first
+                            // shot, to find and check the HUD timer text path. Their variables are the last
+                            // bytes of the mission script area (unused outside missions).
+                            if (shot == 0 && s_vframes == 2 && std::getenv("LCS_DIAG_HUDTIMER")) {
+                                const uint64_t lb = image_game.get_load_bias();
+                                const uint64_t space = *reinterpret_cast<const uint64_t*>(lb + 0x8aab50ULL);  // CTheScripts::ScriptSpace
+                                const uint32_t main_sz = *reinterpret_cast<const uint32_t*>(lb + 0x8b0c6cULL); // MainScriptSize
+                                const uint32_t miss_sz = *reinterpret_cast<const uint32_t*>(lb + 0x8b0c70ULL); // LargestMissionScriptSize
+                                const uint32_t off = main_sz + miss_sz - 16u;
+                                auto* gcpu = &cpu;
+                                if (gcpu && space && miss_sz >= 64u) {
+                                    *reinterpret_cast<int32_t*>(space + off) = 59000;  // clock 0:59
+                                    *reinterpret_cast<int32_t*>(space + off + 4) = 7;  // counter 7
+                                    static char s_clock_key[8] = "TIMER", s_counter_key[8] = "LEVEL", s_empty[8] = "";
+                                    const uint64_t onscn = lb + 0x8724d0ULL;           // CUserDisplay::OnscnTimer
+                                    gcpu->call_nested(lb + 0x3cb118ULL, {onscn, off, reinterpret_cast<uint64_t>(s_clock_key), 1});
+                                    gcpu->call_nested(lb + 0x3cb218ULL, {onscn, off + 4u, 0, reinterpret_cast<uint64_t>(s_counter_key),
+                                                                         0, 0, reinterpret_cast<uint64_t>(s_empty), 0});
+                                    *reinterpret_cast<int32_t*>(space + off + 8) = 60;  // bar counter 60 %
+                                    gcpu->call_nested(lb + 0x3cb218ULL, {onscn, off + 8u, 1, reinterpret_cast<uint64_t>(s_counter_key),
+                                                                         1, 0, reinterpret_cast<uint64_t>(s_empty), 0});
+                                    std::cout << "  [HudTimer] clock and counter added\n" << std::flush;
+                                } else {
+                                    std::cout << "  [HudTimer] skipped: cpu=" << (gcpu != nullptr) << " space=0x" << std::hex << space
+                                              << " main=0x" << main_sz << " mission=0x" << miss_sz << std::dec << "\n" << std::flush;
+                                }
+                            }
+                            // ... and the big messages (CMessages::AddBigMessage styles 0..6, 0.8 s each)
+                            const char* hud_env = std::getenv("LCS_DIAG_HUDTIMER");
+                            const int hud_mode = hud_env ? std::atoi(hud_env) : 0;
+                            if (shot == 0 && s_vframes >= 20 && s_vframes <= 200 && s_vframes % 30 == 20 && hud_mode == 1) {
+                                static uint16_t s_big[7][16];
+                                const int style = (s_vframes - 20) / 30;
+                                const std::string txt = "TITLE STYLE " + std::to_string(style);
+                                for (size_t c = 0; c <= txt.size(); ++c) s_big[style][c] = c < txt.size() ? static_cast<uint8_t>(txt[c]) : 0;
+                                cpu.call_nested(image_game.get_load_bias() + 0x4bfc30ULL,  // CMessages::AddBigMessage
+                                                {reinterpret_cast<uint64_t>(s_big[style]), 800, static_cast<uint64_t>(style)});
+                            }
+                            // LCS_DIAG_HUDTIMER=2: on screen at the captures - shot 0 the mission title and a
+                            // side-mission message, shot 1 the Pricedown ones ("mission passed", "wasted")
+                            if (hud_mode == 2 && s_vframes == 150 && shot <= 1) {
+                                static const char16_t s_title[] = u"Home Sweet Home";
+                                static const char16_t s_side[] = u"Nível 2 concluído: $500";
+                                static const char16_t s_passed[] = u"MISSÃO CUMPRIDA!";
+                                static const char16_t s_wasted[] = u"WASTED";
+                                const uint64_t add_big = image_game.get_load_bias() + 0x4bfc30ULL;  // CMessages::AddBigMessage
+                                if (shot == 0) {
+                                    cpu.call_nested(add_big, {reinterpret_cast<uint64_t>(s_title), 4000, 1});
+                                    cpu.call_nested(add_big, {reinterpret_cast<uint64_t>(s_side), 4000, 5});
+                                } else {
+                                    cpu.call_nested(add_big, {reinterpret_cast<uint64_t>(s_passed), 4000, 0});
+                                    cpu.call_nested(add_big, {reinterpret_cast<uint64_t>(s_wasted), 4000, 2});
+                                }
+                            }
                             if (s_vframes <= 240) {
                                 // Face the heading every frame (GTA: 0 = north, counter-clockwise)
                                 tr.set_player_heading(sv[3]);
@@ -3038,7 +3092,7 @@ int main(int argc, char* argv[]) {
                                 const uint64_t fn_auto_tp = image_game.find_symbol("_ZN11CAutomobile8TeleportE7CVector");
                                 const uint64_t vp_addr    = image_game.find_symbol("_ZN6CPools15ms_pVehiclePoolE");
                                 tr.enqueue_cpu_action([&, fn_ped, fn_warp, fn_auto_tp, vp_addr]() {
-                                    auto* gcpu = lcs::cpu::DynarmicCore::current();
+                                    auto* gcpu = &cpu;
                                     if (!gcpu) return;
                                     const uint64_t ped = fn_ped ? gcpu->call_nested(fn_ped, {}) : 0;
                                     const uint64_t pool_va = vp_addr ? *reinterpret_cast<const uint64_t*>(vp_addr) : 0;

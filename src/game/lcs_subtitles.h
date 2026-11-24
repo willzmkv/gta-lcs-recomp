@@ -21,6 +21,8 @@ void begin_frame();
 
 // Returns true when any intercepted Oswald subtitle or help-box is queued for the current frame.
 bool has_active_items();
+// Timers, counters, mission title and side-mission messages queued for Oswald this frame.
+bool has_active_hud_items();
 
 // Returns true when an intercepted Oswald help-box is queued for the current frame.
 bool has_active_help_box();

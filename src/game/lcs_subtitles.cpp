@@ -67,6 +67,46 @@ struct ColorSeg {
 std::mutex g_sub_mutex;
 std::vector<QueuedText> g_sub_queue;
 bool g_letterbox_active = false;
+
+// Other CHud texts redrawn in Oswald where the game places them, with its alignment, scale,
+// colour and drop shadow (CFont::Details). Positions are the game's 640x448 virtual canvas.
+struct HudText {
+    float x = 0.0f, y = 0.0f;
+    float scale_y = 1.0f;
+    float wrap_w = 0.0f;  // centred texts wrap at this virtual width (0: one line)
+    int align = 0;        // 0 left, 1 centre, 2 right
+    int style = 1;        // CFont style: 0 the title font, 1 the HUD / subtitle font
+    ImU32 color = 0;
+    uint8_t alpha = 255;
+    float shadow = 0.0f;  // drop shadow offset (virtual px)
+    ImU32 shadow_color = 0;
+    std::string raw_tagged;
+};
+std::vector<HudText> g_hud_queue;
+
+// CFont::PrintString return addresses of those texts, found with the rig
+// (LCS_DIAG_HUDTIMER: COnscreenTimer::AddClock / AddCounter and CMessages::AddBigMessage).
+enum class HudKind { None, Line, Wrapped, Pricedown };
+HudKind classify_hud_ra(uint64_t ra_rva) {
+    switch (ra_rva) {
+    case 0x480908ULL:  // COnscreenTimer clock value ("0:58"), right-justified left of the HUD
+    case 0x480a08ULL:  // clock label
+    case 0x481080ULL:  // counter value ("7/10")
+    case 0x480b44ULL:  // counter label ("Nível")
+    case 0x4806d8ULL:  // bar counter label
+    case 0x485414ULL:  // CHud::DrawAfterFade big message style 1: the mission title, bottom right
+        return HudKind::Line;
+    case 0x484e7cULL:  // big message styles 3, 4 and 5: side-mission messages, centred
+    case 0x484f54ULL:
+    case 0x4851acULL:
+        return HudKind::Wrapped;
+    case 0x482614ULL:  // big message style 0 ("Missão cumprida"), Pricedown, centred
+    case 0x48273cULL:  // big message style 2 ("Wasted" / "Busted"), Pricedown, centred
+        return HudKind::Pricedown;
+    default:
+        return HudKind::None;
+    }
+}
 float g_letterbox_top_frac = 0.8973f;
 uint64_t g_load_bias = 0;
 uint64_t g_using_japanese_addr = 0;
@@ -482,6 +522,39 @@ uint64_t handle_print_string(const uint64_t* args) {
         }
     }
 
+    if (const HudKind hk = classify_hud_ra(ra_rva); hk != HudKind::None) {
+        if (hk == HudKind::Pricedown && !ui::fontPricedown()) return 0;  // no Pricedown Bl.otf: game font
+        const uint16_t* hu = reinterpret_cast<const uint16_t*>(str_va);
+        const auto* det = *reinterpret_cast<const uint8_t* const*>(g_load_bias + kGotFontDetailsRva);
+        if (!hu[0] || !det) return 0;
+        HudText ht;
+        bool cjk = false;
+        if (!decode_u16_preserve_tags(hu, ht.raw_tagged, cjk) || cjk) return 0;  // CJK keeps the game's font
+        const uint32_t bx = static_cast<uint32_t>(args[2]), by = static_cast<uint32_t>(args[3]);
+        std::memcpy(&ht.x, &bx, 4);
+        std::memcpy(&ht.y, &by, 4);
+        float scale_y = 1.0f, alpha_fade = 255.0f, centre_size = 0.0f, shadow = 0.0f;
+        std::memcpy(&scale_y, det + 0x08, 4);
+        std::memcpy(&alpha_fade, det + 0x24, 4);
+        std::memcpy(&centre_size, det + 0x30, 4);
+        int16_t style = 1, shadow_pos = 0;
+        std::memcpy(&style, det + 0x38, 2);
+        std::memcpy(&shadow_pos, det + 0x40, 2);
+        shadow = static_cast<float>(shadow_pos);
+        ht.scale_y = std::clamp(scale_y, 0.1f, 4.0f);
+        ht.align = det[0x1a] ? 2 : (det[0x19] ? 1 : 0);
+        ht.wrap_w = (hk != HudKind::Line && ht.align == 1) ? centre_size : 0.0f;
+        ht.style = style;
+        ht.color = IM_COL32(det[0], det[1], det[2], 255);
+        const float a_fade = (alpha_fade >= 0.0f && alpha_fade <= 255.0f) ? alpha_fade / 255.0f : 1.0f;
+        ht.alpha = static_cast<uint8_t>(std::clamp(det[3] / 255.0f * a_fade, 0.0f, 1.0f) * 255.0f + 0.5f);
+        ht.shadow = shadow;
+        ht.shadow_color = IM_COL32(det[0x44], det[0x45], det[0x46], det[0x47]);
+        std::lock_guard<std::mutex> lk(g_sub_mutex);
+        if (g_hud_queue.size() < 24) g_hud_queue.push_back(std::move(ht));
+        return 1;  // Suppress the native CFont bitmap draw
+    }
+
     if (!is_sub && !is_help) return 0;
 
     const uint16_t* u16 = reinterpret_cast<const uint16_t*>(str_va);
@@ -713,6 +786,7 @@ void install_hooks(const lcs::cpu::ElfImage& image_game, lcs::cpu::DynarmicCore&
 void begin_frame() {
     std::lock_guard<std::mutex> lk(g_sub_mutex);
     g_sub_queue.clear();
+    g_hud_queue.clear();
     g_letterbox_active = false;
 }
 
@@ -720,6 +794,12 @@ bool has_active_items() {
     if (lcs::settings::get().subtitle_font != 1) return false;
     std::lock_guard<std::mutex> lk(g_sub_mutex);
     return !g_sub_queue.empty();
+}
+
+bool has_active_hud_items() {
+    if (lcs::settings::get().subtitle_font != 1) return false;
+    std::lock_guard<std::mutex> lk(g_sub_mutex);
+    return !g_hud_queue.empty();
 }
 
 bool has_active_help_box() {
@@ -737,12 +817,14 @@ void draw_overlay(ImDrawList* dl, float display_w, float display_h) {
     if (cfg.subtitle_font != 1) return;
 
     std::vector<QueuedText> items;
+    std::vector<HudText> hud_items;
     bool letterbox_active = false;
     float letterbox_top_frac = 0.8973f;
     {
         std::lock_guard<std::mutex> lk(g_sub_mutex);
-        if (g_sub_queue.empty()) return;
+        if (g_sub_queue.empty() && g_hud_queue.empty()) return;
         items = g_sub_queue;
+        hud_items = g_hud_queue;
         letterbox_active = g_letterbox_active;
         letterbox_top_frac = g_letterbox_top_frac;
     }
@@ -761,6 +843,43 @@ void draw_overlay(ImDrawList* dl, float display_w, float display_h) {
     const bool drop_shadow = (cfg.subtitle_shadow != 0);
     const int bg_pct = std::clamp(cfg.subtitle_background, 0, 100);
     const bool force_white = (cfg.subtitle_colour != 0);
+
+    // CHud texts (timers, counters, mission title, side-mission messages) where the game puts them
+    const float vx = display_w / 640.0f, vy = display_h / 448.0f;
+    for (const auto& h : hud_items) {
+        if (h.alpha == 0) continue;
+        // Oswald (Pricedown for style 2) at the bitmap font's glyph height; style 0, the title
+        // font, is larger
+        ImFont* hf = (h.style == 2 && ui::fontPricedown()) ? ui::fontPricedown() : font;
+        const float px_per_scale = h.style == 2 ? 11.5f : (h.style == 0 ? 22.0f : 17.5f);
+        const float font_sz = std::max(10.0f, h.scale_y * px_per_scale * vy);
+        const float max_w = h.wrap_w > 0.0f ? h.wrap_w * vx : FLT_MAX;
+        const ImU32 base = (h.color & 0x00FFFFFFu) | (static_cast<ImU32>(h.alpha) << IM_COL32_A_SHIFT);
+        const auto words = tokenize_words(parse_tagged_segments(h.raw_tagged, base, false, h.alpha));
+        std::vector<std::vector<RenderedRun>> lines;
+        layout_wrapped_lines(hf, font_sz, max_w, words, lines);
+        const float sh = h.shadow * vy;
+        const uint8_t sh_a = static_cast<uint8_t>(((h.shadow_color >> IM_COL32_A_SHIFT) & 0xFFu) * (h.alpha / 255.0f));
+        const ImU32 sh_col = (h.shadow_color & 0x00FFFFFFu) | (static_cast<ImU32>(sh_a) << IM_COL32_A_SHIFT);
+        float cy = h.y * vy + font_sz * 0.12f;
+        for (const auto& ln : lines) {
+            float lw = 0.0f;
+            for (const auto& r : ln) lw += r.width;
+            float cx = h.x * vx - (h.align == 2 ? lw : h.align == 1 ? lw * 0.5f : 0.0f);
+            for (const auto& r : ln) {
+                if (r.kind == ColorSeg::Kind::Token) {
+                    draw_inline_token(dl, hf, font_sz, ImVec2(cx, cy), r.width, r.text, r.plat, h.alpha);
+                } else {
+                    if (sh > 0.0f && sh_a > 0) dl->AddText(hf, font_sz, ImVec2(cx + sh, cy + sh), sh_col, r.text.c_str());
+                    // (the Pricedown bitmap glyphs carry a thick black outline)
+                    draw_text_with_outline(dl, hf, font_sz, ImVec2(cx, cy), r.text.c_str(), r.color, h.alpha,
+                                           h.style == 2 ? 160.0f : outline_pct * 0.5f, false);
+                }
+                cx += r.width;
+            }
+            cy += font_sz * 1.12f;
+        }
+    }
 
     for (const auto& item : items) {
         if (item.alpha <= 0.01f) continue;

@@ -594,7 +594,7 @@ bool has_visible_overlay() {
     // CRITICAL: Never invoke ImGui_ImplDX12_RenderDrawData during boot splash/Legal loading,
     // which would submit a synchronous command list while the game is loading textures/fonts!
     if (is_blocking_game_input()) return true;
-    if (lcs::subtitles::has_active_items()) return true;
+    if (lcs::subtitles::has_active_items() || lcs::subtitles::has_active_hud_items()) return true;
     const auto& tr = lcs::game::LCSTrainer::instance();
     if (!tr.is_in_gameplay()) return false;
     return !tr.notices().empty() || lcs::settings::get().display_fps_counter > 0 || lcs::ui_diag::is_open();

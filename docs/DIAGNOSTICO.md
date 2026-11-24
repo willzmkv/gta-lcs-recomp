@@ -19,6 +19,7 @@ Todas são lidas por `lcs.exe` (`src/core/main.cpp`, salvo indicação).
 | `LCS_DIAG_SHOT_RADIUS=r` | Com `SHOTS`: raio do HD World nas capturas (padrão o do `lcs.ini`) |
 | `LCS_DIAG_SKIP=distance,memory,worldhd` | Não instala esses módulos (bissecção de bugs de render). Sem `memory` o mundo não carrega |
 | `LCS_DIAG_CLOUDS=1` | Loga a cada 2 s as taxas de `CClouds::CloudRotation`/`IndividualRotation` e o valor esperado (independente de FPS) |
+| `LCS_DIAG_HUDTIMER=1\|2` | Com `SHOTS`: cria um relógio, um contador e um contador de barra (`COnscreenTimer::AddClock/AddCounter`) no 1º shot; `1` dispara as mensagens grandes estilos 0..6 (descobrir endereços), `2` deixa na captura o título de missão + mensagem de serviço (shot 0) e "missão cumprida" + "wasted" (shot 1) |
 | `LCS_DIAG_HUDTEXT=1` | Loga os textos do HUD (`[HudText]`: endereço de retorno, posição, fonte). Com o F3 aberto também grava `lcs_hudtext.log` ao lado do `lcs.exe` |
 | `LCS_PED_INVIEW_MIN=m` | Piso da distância de spawn de pedestres na visão (padrão: sem piso — o jogo já usa ≥ ~90 m; 100–160 m esvaziou as calçadas perto do jogador) |
 | `LCS_CAR_INVIEW_BASE=b`, `LCS_CAR_NODE_RADIUS=r` | Base do spawn de carros na visão (185) e raio de busca de nós (380) — 280/520 esvaziou as ruas |

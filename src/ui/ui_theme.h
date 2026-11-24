@@ -57,5 +57,8 @@ namespace ui
     ImFont *fontSemibold();
     ImFont *fontCondensed();
     ImFont *fontOswald();
+    // Pricedown Bl.otf from fonts/ when present (nullptr otherwise): HD stand-in for the game's
+    // Pricedown bitmap font.
+    ImFont *fontPricedown();
     void drawChevron(ImDrawList *dl, ImVec2 center, bool rightDir, float scale, ImU32 col);
 }

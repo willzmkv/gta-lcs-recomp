@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "ui/ui_theme.h"
 
 #include <algorithm>
@@ -15,6 +16,7 @@ namespace ui
         ImFont *g_fontSemibold = nullptr;
         ImFont *g_fontCondensed = nullptr;
         ImFont *g_fontOswald = nullptr;
+        ImFont *g_fontPricedown = nullptr; // HD replacement for the game's Pricedown bitmap font (optional)
 
         std::string findFirstFont(const std::vector<std::filesystem::path> &dirs, std::initializer_list<const char *> names)
         {
@@ -39,6 +41,7 @@ namespace ui
                 if (!p.empty() && std::filesystem::is_directory(p, ec))
                     dirs.push_back(p);
             };
+            addIfDir("fonts"); // fonts supplied with the port (e.g. Pricedown Bl.otf), not in git
             addIfDir("assets/fonts/oswald");
             addIfDir("assets/fonts");
 #if defined(_WIN32)
@@ -118,6 +121,12 @@ namespace ui
             mergeCjkIfAny(40.0f);
         }
 
+        const std::string pricedownPath = findFirstFont(dirs, {"Pricedown Bl.otf", "pricedown bl.otf", "pricedown.otf", "pricedown.ttf"});
+        if (!pricedownPath.empty())
+            g_fontPricedown = io.Fonts->AddFontFromFileTTF(pricedownPath.c_str(), 48.0f, &cfg);
+        std::printf("[UI] Pricedown font: %s (%s)\n", pricedownPath.empty() ? "not found" : pricedownPath.c_str(),
+                    g_fontPricedown ? "loaded" : "not loaded");
+
         if (!g_fontSemibold) g_fontSemibold = g_fontRegular;
         if (!g_fontCondensed) g_fontCondensed = g_fontSemibold;
         if (!g_fontOswald) g_fontOswald = g_fontCondensed;
@@ -135,6 +144,7 @@ namespace ui
     ImFont *fontSemibold() { return g_fontSemibold ? g_fontSemibold : fontRegular(); }
     ImFont *fontCondensed() { return g_fontCondensed ? g_fontCondensed : fontSemibold(); }
     ImFont *fontOswald() { return g_fontOswald ? g_fontOswald : fontCondensed(); }
+    ImFont *fontPricedown() { return g_fontPricedown; }
 
     void drawChevron(ImDrawList *dl, ImVec2 c, bool rightDir, float s, ImU32 col)
     {
