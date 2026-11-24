@@ -6,6 +6,8 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace lcs::cpu {
 class DynarmicCore;
@@ -23,6 +25,10 @@ public:
     void tick(lcs::cpu::DynarmicCore& cpu);
     // Prints the counts gathered since the last report (and resets them).
     void report(const std::string& label, double seconds);
+    // Entities entering CRenderer's visible list near the screen centre (<= 20 deg from the
+    // player's heading): which models pop in, and at what distance. Game thread.
+    void tick_visible();
+    void report_visible();
 
 private:
     struct Counts {
@@ -40,10 +46,16 @@ private:
     uint64_t m_fn_player_ped = 0;
     uint64_t m_fn_player_vehicle = 0;
     bool m_primed = false;
+    uint64_t m_player_entity = 0;  // vehicle when driving, else ped (set by tick)
     uint8_t m_prev_peds[1024]{};
     uint8_t m_prev_vehicles[1024]{};
     Counts m_peds;
     Counts m_vehicles;
+    struct VisPop { int count = 0; double dist_sum = 0.0; float dmin = 1e9f, dmax = 0.0f; };
+    std::unordered_set<uint64_t> m_prev_visible;
+    std::unordered_set<uint64_t> m_prev_positions;
+    int m_vis_swaps = 0;
+    std::unordered_map<int, VisPop> m_vis_pops;
 };
 
 } // namespace lcs::game

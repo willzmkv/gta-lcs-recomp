@@ -196,7 +196,7 @@ float compute_prop_effective_dist(float raw_largest, float detail_scale) {
     const int detail_dist = lcs::settings::get().detail_distance;
     const float scaled = raw_largest * detail_scale;
     if (detail_dist >= 30 && raw_largest >= 12.0f && raw_largest < 300.0f) {
-        const float prop_floor = map_slider_curve(detail_dist, 55.0f, 160.0f, 350.0f);
+        const float prop_floor = map_slider_curve(detail_dist, 55.0f, 160.0f, 550.0f);
         return std::max(scaled, prop_floor);
     }
     return scaled;
@@ -471,7 +471,7 @@ void LcsDistance::install(const lcs::cpu::ElfImage& image_game, lcs::cpu::Dynarm
         auto* sp = reinterpret_cast<float*>(m_va_inv_detail_scale);
         sp[0] = 1.0f / std::max(0.1f, detail_scale);
         sp[1] = detail_scale;
-        sp[2] = (detail_dist >= 30) ? map_slider_curve(detail_dist, 55.0f, 160.0f, 350.0f) : 0.0f;
+        sp[2] = (detail_dist >= 30) ? map_slider_curve(detail_dist, 55.0f, 160.0f, 550.0f) : 0.0f;
         sp[3] = (detail_dist >= 30) ? 12.0f : 1e9f;
         sp[4] = 300.0f;
         sp[5] = 0.1f;
@@ -1383,7 +1383,7 @@ void LcsDistance::sync_settings_now() {
         auto* sp = reinterpret_cast<float*>(m_va_inv_detail_scale);
         sp[0] = 1.0f / std::max(0.1f, detail_scale);
         sp[1] = detail_scale;
-        sp[2] = (detail_dist >= 30) ? map_slider_curve(detail_dist, 55.0f, 160.0f, 350.0f) : 0.0f;
+        sp[2] = (detail_dist >= 30) ? map_slider_curve(detail_dist, 55.0f, 160.0f, 550.0f) : 0.0f;
         sp[3] = (detail_dist >= 30) ? 12.0f : 1e9f;
         sp[4] = 300.0f;
         sp[5] = 0.1f;

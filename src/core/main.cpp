@@ -3164,6 +3164,7 @@ int main(int argc, char* argv[]) {
                                 }
                                 tr.enqueue_cpu_action([&probe]() {
                                     if (auto* gcpu = lcs::cpu::DynarmicCore::current()) probe.tick(*gcpu);
+                                    probe.tick_visible();
                                 });
                             }
                             const bool cell_changed = (cx != s_last_cx || cy != s_last_cy);
@@ -3273,6 +3274,7 @@ int main(int argc, char* argv[]) {
                                 if (s_popin_drive) {
                                     lcs::game::PopinProbe::instance().report("drive", std::chrono::duration<double>(
                                         std::chrono::steady_clock::now() - s_drive_t0).count());
+                                    lcs::game::PopinProbe::instance().report_visible();
                                 }
                                 std::cout << "  [VerifyDone] Cruise complete. peak_ms=" << s_peak_ms
                                           << " min_ms=" << s_min_ms << " cell_caps=" << s_cap_idx << "\n" << std::flush;
