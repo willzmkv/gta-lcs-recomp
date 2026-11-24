@@ -28,6 +28,7 @@ struct RuntimeSettings {
     int display_msaa = 4;         // 1, 2, 4, 8
     int display_aniso = 16;       // 0, 2, 4, 8, 16
     int ipad_shadows = 1;         // 0 = Off, 1 = Dynamic iPad Shadows (_SDWMAP)
+    int stochastic_textures = 1;  // 0 = Off, 1 = SkyGfx (linear blend), 2 = Sharpened blend (more contrast)
     int color_grading = 1;        // 0 = Off, 1 = iPad Retina Color Grading
     int brightness = 62;          // 0..100
     int contrast = 50;            // 0..100

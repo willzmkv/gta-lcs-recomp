@@ -38,6 +38,7 @@
 #include "game/lcs_distance.h"
 #include "game/lcs_memory.h"
 #include "game/lcs_physics_timing.h"
+#include "game/lcs_stochastic.h"
 #include "game/lcs_subtitles.h"
 #include "game/lcs_prompts.h"
 #include "game/lcs_ps2_effects.h"
@@ -1933,6 +1934,7 @@ int main(int argc, char* argv[]) {
         setup_pc_ultrawide_menu_hooks(image_game, cpu, guest_width, guest_height);
     volatile uint32_t* audio_sfx_allow = setup_pc_audio_timing_hooks(image_game, cpu);
     lcs::game::install_physics_timing_hooks(image_game, cpu);
+    lcs::game::install_stochastic_texture_hooks(image_game, cpu);
     lcs::subtitles::install_hooks(image_game, cpu);
     lcs::game::LCSTrainer::instance().install_brief_hooks(image_game, cpu);
 

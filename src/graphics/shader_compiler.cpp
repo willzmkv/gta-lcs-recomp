@@ -845,7 +845,7 @@ TranslatedProgramHLSL translate_program_to_hlsl(
            << "#define inversesqrt rsqrt\n"
            << "#define dFdx ddx\n"
            << "#define dFdy ddy\n"
-           << "#define texture2D(tex, uv) tex.Sample(tex##_sampler, uv)\n"
+           << "#define texture2D(tex, uv) lcs_tex2d_##tex(uv)\n"
            << "#define textureCube(tex, dir) tex.Sample(tex##_sampler, dir)\n"
            << "float gl_mod(float x, float y) { return x - y * floor(x / y); }\n"
            << "float2 gl_mod(float2 x, float2 y) { return x - y * floor(x / y); }\n"
@@ -998,6 +998,54 @@ TranslatedProgramHLSL translate_program_to_hlsl(
     {
         std::ostringstream ps;
         ps << shared.str();
+
+        // texture2D() goes through one helper per sampler. Samplers t0/t1 can switch per draw to
+        // stochastic (hex-tiling) sampling, as in SkyGfx Extended: three samples at pseudo-random
+        // offsets pinned to the vertices of a triangle grid, blended by barycentric weights, with
+        // the derivatives of the original UV. pc_color_grade.w (set per draw by the D3D12 backend)
+        // holds bit i = sampler t<i> is tagged, bit 2 = sharpen the weights (w^4) to keep contrast.
+        bool has_sto = false;
+        for (const auto& u : result.uniforms) {
+            if (u.is_sampler && u.gl_type == 0x8B5E && u.sampler_slot < 2) has_sto = true;
+        }
+        if (has_sto) {
+            ps << "float2 lcs_sto_hash(float2 p) {\n"
+               << "    return frac(sin(fmod(float2(dot(p, float2(127.1, 311.7)), dot(p, float2(269.5, 183.3))), 3.14159)) * 43758.5453);\n"
+               << "}\n"
+               << "float4 lcs_sample_sto(Texture2D t, SamplerState s, float2 uv, uint bit) {\n"
+               << "    const float2 dx = ddx(uv);\n"
+               << "    const float2 dy = ddy(uv);\n"
+               << "    const uint mask = (uint)pc_color_grade.w;\n"
+               << "    [branch] if ((mask & bit) != 0u) {\n"
+               << "        const float2 skew = float2(3.46410162 * uv.x, 4.0 * uv.y - 2.0 * uv.x);\n"
+               << "        const float2 vid = floor(skew);\n"
+               << "        const float2 f = frac(skew);\n"
+               << "        const float fz = 1.0 - f.x - f.y;\n"
+               << "        float2 v0 = vid + float2(1.0, 1.0);\n"
+               << "        float2 v1 = vid + float2(1.0, 0.0);\n"
+               << "        float2 v2 = vid + float2(0.0, 1.0);\n"
+               << "        float3 w = float3(-fz, 1.0 - f.y, 1.0 - f.x);\n"
+               << "        if (fz > 0.0) { v0 = vid; v1 = vid + float2(0.0, 1.0); v2 = vid + float2(1.0, 0.0); w = float3(fz, f.y, f.x); }\n"
+               << "        if ((mask & 4u) != 0u) { w *= w; w *= w; w /= (w.x + w.y + w.z); }\n"
+               << "        return t.SampleGrad(s, uv + lcs_sto_hash(v0), dx, dy) * w.x +\n"
+               << "               t.SampleGrad(s, uv + lcs_sto_hash(v1), dx, dy) * w.y +\n"
+               << "               t.SampleGrad(s, uv + lcs_sto_hash(v2), dx, dy) * w.z;\n"
+               << "    }\n"
+               << "    return t.SampleGrad(s, uv, dx, dy);\n"
+               << "}\n";
+        }
+        for (const auto& u : result.uniforms) {
+            if (!u.is_sampler || u.gl_type != 0x8B5E) continue;
+            ps << "float4 lcs_tex2d_" << u.name << "(float2 uv) { return ";
+            if (u.sampler_slot < 2) {
+                ps << "lcs_sample_sto(" << u.name << ", " << u.name << "_sampler, uv, "
+                   << (1u << u.sampler_slot) << "u)";
+            } else {
+                ps << u.name << ".Sample(" << u.name << "_sampler, uv)";
+            }
+            ps << "; }\n";
+        }
+        ps << "\n";
         ps << "static float4 gl_FragColor;\n";
         for (const auto& v : varyings) {
             ps << "static " << hlsl_type_from_gl_type(v.gl_type) << " " << v.name << ";\n";

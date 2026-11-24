@@ -80,6 +80,8 @@ bool load(const std::string& path) {
         else if (key == "display.msaa") g_settings.display_msaa = std::clamp(parse_int(val, g_settings.display_msaa), 1, 8);
         else if (key == "display.aniso") g_settings.display_aniso = std::clamp(parse_int(val, g_settings.display_aniso), 0, 16);
         else if (key == "graphics.ipad_shadows") g_settings.ipad_shadows = std::clamp(parse_int(val, g_settings.ipad_shadows), 0, 1);
+        else if (key == "graphics.stochastic_textures")
+            g_settings.stochastic_textures = std::clamp(parse_int(val, g_settings.stochastic_textures), 0, 2);
         else if (key == "graphics.color_grading" || key == "graphics.post_process")
             g_settings.color_grading = std::clamp(parse_int(val, g_settings.color_grading), 0, 1);
         else if (key == "graphics.brightness") g_settings.brightness = std::clamp(parse_int(val, g_settings.brightness), 0, 100);
@@ -144,6 +146,7 @@ bool save(const std::string& path) {
         {"display.msaa", std::to_string(g_settings.display_msaa)},
         {"display.aniso", std::to_string(g_settings.display_aniso)},
         {"graphics.ipad_shadows", std::to_string(g_settings.ipad_shadows)},
+        {"graphics.stochastic_textures", std::to_string(g_settings.stochastic_textures)},
         {"graphics.color_grading", std::to_string(g_settings.color_grading)},
         {"graphics.brightness", std::to_string(g_settings.brightness)},
         {"graphics.contrast", std::to_string(g_settings.contrast)},
@@ -229,6 +232,10 @@ void apply_live() {
         }
     }
     lcs::graphics::RenderBridge::instance().set_vsync_enabled(lcs::core::g_config.vsync);
+
+    int stochastic_mode = g_settings.stochastic_textures;
+    if (const char* e = std::getenv("LCS_STOCHASTIC"); e && *e) stochastic_mode = std::atoi(e); // A/B tests
+    lcs::graphics::RenderBridge::instance().set_stochastic_mode(stochastic_mode);
 
     // Apply iPad Color Grading
     if (g_settings.color_grading) {

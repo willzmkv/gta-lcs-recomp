@@ -94,6 +94,7 @@ set(SOURCES
     src/game/lcs_memory.cpp
     src/game/lcs_ps2_effects.cpp
     src/game/lcs_physics_timing.cpp
+    src/game/lcs_stochastic.cpp
     src/game/lcs_dialogue_speakers.cpp
     src/game/lcs_subtitles.cpp
     src/ui/ui_loc.cpp

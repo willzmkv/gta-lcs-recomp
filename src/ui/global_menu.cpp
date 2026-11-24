@@ -2427,6 +2427,10 @@ namespace ui
                          "FILTRO ANISOTRÓPICO", "Mantém asfalto e fachadas nítidos em ângulos inclinados.");
                 toggleRow("##sdw", "Sombras dinâmicas iPad (_SDWMAP)", cfg.ipad_shadows,
                           "SOMBRAS DINÂMICAS", "Ativa o mapa de sombras em tempo real portado da versão iPad Retina.");
+                static const char *kStoO[] = {"Desligado", "SkyGfx", "Contraste preservado"};
+                static const int kStoV[] = {0, 1, 2};
+                cycleRow("##sto", "Texturas estocásticas", cfg.stochastic_textures, kStoO, kStoV, 3,
+                         "TEXTURAS ESTOCÁSTICAS", "Quebra a repetição de grama, concreto e terra: amostra a textura em três posições aleatórias e mistura (técnica do SkyGfx). \"Contraste preservado\" deixa as transições mais curtas.");
 
                 section("MUNDO & DISTÂNCIAS (PC)");
                 sliderRow("##vd", "Distância de visão", cfg.view_distance, 0, 100, 5, "%",

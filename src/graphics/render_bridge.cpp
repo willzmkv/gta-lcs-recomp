@@ -818,6 +818,22 @@ void RenderBridge::set_color_grading(float brightness_mul, float contrast_mul, f
 #endif
 }
 
+void RenderBridge::set_texture_stochastic(uint32_t tex_id, bool enabled) {
+#if defined(LCS_ENABLE_D3D12)
+    d3d12::set_d3d12_texture_stochastic(tex_id, enabled);
+#else
+    (void)tex_id; (void)enabled;
+#endif
+}
+
+void RenderBridge::set_stochastic_mode(int mode) {
+#if defined(LCS_ENABLE_D3D12)
+    d3d12::set_d3d12_stochastic_mode(mode);
+#else
+    (void)mode;
+#endif
+}
+
 void RenderBridge::queue_ps2_post_process(const Ps2PostProcessParams& params) {
     std::lock_guard<std::mutex> lock(m_ps2_mutex);
     const bool prev_reset = m_pending_ps2_params.reset_history;

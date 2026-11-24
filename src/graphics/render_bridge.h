@@ -149,6 +149,8 @@ public:
     void set_vsync_enabled(bool enabled);
     bool is_vsync_enabled() const { return m_vsync_enabled; }
     void set_color_grading(float brightness_mul, float contrast_mul, float saturation_mul);
+    void set_texture_stochastic(uint32_t tex_id, bool enabled);
+    void set_stochastic_mode(int mode);
     void queue_ps2_post_process(const Ps2PostProcessParams& params);
     void flush_pending_ps2_post_process();
     void apply_ps2_post_process(const Ps2PostProcessParams& params);

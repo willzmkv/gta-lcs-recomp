@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -354,6 +355,8 @@ struct D3D12State {
     D3D12_GPU_VIRTUAL_ADDRESS cached_cb_addr = 0;
     D3D12_GPU_VIRTUAL_ADDRESS cached_bound_cb_addr = 0;
     bool cached_grade_dirty = true;
+    uint32_t draw_sto_mask = 0;   // pc_color_grade.w for the next draw: bit i = t<i> stochastic, bit 2 = sharpened weights
+    uint32_t cached_sto_mask = 0;
     uint64_t frame_seq = 1;
     uint32_t next_srv_gen = 1;
     uint32_t cached_prog_id = 0;
@@ -442,6 +445,12 @@ struct TmpScopedNsTimer {
 };
 
 D3D12State g_d3d;
+
+// GL texture names tagged for stochastic sampling (lcs_stochastic.cpp). Written by the game's
+// upload thread, read per draw: relaxed atomics, names past the table are never tagged.
+constexpr uint32_t kStochasticIdLimit = 1u << 20;
+std::atomic<uint8_t> g_stochastic_ids[kStochasticIdLimit];
+std::atomic<int> g_stochastic_mode{0};
 
 void log_hresult_failure(const char* stage, HRESULT hr) {
     std::cerr << "[D3D12] " << stage << " failed (HRESULT=0x"
@@ -2326,6 +2335,16 @@ void bind_d3d12_framebuffer(uint32_t fbo_id, uint32_t color_tex_id, uint32_t dep
     g_d3d.cached_scissor_valid = false;
 }
 
+void set_d3d12_texture_stochastic(uint32_t tex_id, bool enabled) {
+    if (tex_id != 0 && tex_id < kStochasticIdLimit) {
+        g_stochastic_ids[tex_id].store(enabled ? 1 : 0, std::memory_order_relaxed);
+    }
+}
+
+void set_d3d12_stochastic_mode(int mode) {
+    g_stochastic_mode.store(std::clamp(mode, 0, 2), std::memory_order_relaxed);
+}
+
 void set_d3d12_color_grading(float brightness_mul, float contrast_mul, float saturation_mul) {
     const float nb = std::clamp(brightness_mul, 0.2f, 2.5f);
     const float nc = std::clamp(contrast_mul, 0.2f, 2.5f);
@@ -3062,6 +3081,7 @@ void update_d3d12_texture_sub(uint32_t tex_id, int32_t xoffset, int32_t yoffset,
 
 void delete_d3d12_texture(uint32_t tex_id) {
     if (tex_id == 0) return;
+    if (tex_id < kStochasticIdLimit) g_stochastic_ids[tex_id].store(0, std::memory_order_relaxed);
     auto it = g_d3d.textures.find(tex_id);
     if (it == g_d3d.textures.end()) return;
     retire_texture_resource(it->second);
@@ -3188,9 +3208,24 @@ PSOKey build_pso_key(uint32_t prog_id, const D3D12RenderState& state,
     return pso_key;
 }
 
+uint32_t stochastic_mask_for(const uint32_t bound_textures[8]) {
+    const int mode = g_stochastic_mode.load(std::memory_order_relaxed);
+    if (mode <= 0) return 0;
+    uint32_t mask = 0;
+    for (uint32_t i = 0; i < 2; ++i) {
+        const uint32_t id = bound_textures[i];
+        if (id != 0 && id < kStochasticIdLimit && g_stochastic_ids[id].load(std::memory_order_relaxed)) {
+            mask |= 1u << i;
+        }
+    }
+    if (mask != 0 && mode == 2) mask |= 4u;
+    return mask;
+}
+
 bool resolve_srv_table(const uint32_t bound_textures[8],
                        uint32_t& out_dst_slot,
                        uint32_t& out_sampler_table) {
+    g_d3d.draw_sto_mask = stochastic_mask_for(bound_textures);
     auto addr_mode_idx = [](uint32_t wrap) -> uint32_t {
         if (wrap == 0x812F || wrap == 0x2900) return 1u; // GL_CLAMP_TO_EDGE / GL_CLAMP
         if (wrap == 0x8370) return 2u;                   // GL_MIRRORED_REPEAT
@@ -3357,10 +3392,17 @@ void bind_draw_pipeline_state(ID3D12PipelineState* pso,
             g_d3d.color_grade_brightness,
             g_d3d.color_grade_contrast,
             g_d3d.color_grade_saturation,
-            1.0f
+            static_cast<float>(g_d3d.draw_sto_mask)
         };
         g_d3d.command_list->SetGraphicsRoot32BitConstants(3, 4, grade_consts, 0);
         g_d3d.cached_grade_dirty = false;
+        g_d3d.cached_sto_mask = g_d3d.draw_sto_mask;
+    } else if (g_d3d.cached_sto_mask != g_d3d.draw_sto_mask) {
+        const float sto = static_cast<float>(g_d3d.draw_sto_mask);
+        uint32_t bits = 0;
+        std::memcpy(&bits, &sto, sizeof(bits));
+        g_d3d.command_list->SetGraphicsRoot32BitConstant(3, bits, 3);
+        g_d3d.cached_sto_mask = g_d3d.draw_sto_mask;
     }
     D3D12_GPU_DESCRIPTOR_HANDLE sampler_gpu = g_d3d.sampler_heap->GetGPUDescriptorHandleForHeapStart();
     sampler_gpu.ptr += static_cast<SIZE_T>(sampler_table) * 8 * g_d3d.sampler_descriptor_size;

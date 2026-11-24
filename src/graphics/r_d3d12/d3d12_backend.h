@@ -61,6 +61,10 @@ void set_d3d12_scissor(int32_t x, int32_t y, uint32_t width, uint32_t height);
 void bind_d3d12_framebuffer(uint32_t fbo_id, uint32_t color_tex_id, uint32_t depth_tex_id,
                             uint32_t width, uint32_t height);
 void set_d3d12_color_grading(float brightness_mul, float contrast_mul, float saturation_mul);
+// Stochastic (hex-tiling) sampling: per-texture tag and global mode (0 off, 1 linear blend as in
+// SkyGfx, 2 sharpened blend weights that keep more contrast).
+void set_d3d12_texture_stochastic(uint32_t tex_id, bool enabled);
+void set_d3d12_stochastic_mode(int mode);
 void apply_d3d12_ps2_post_process(const Ps2PostProcessParams& params);
 
 bool register_d3d12_program(uint32_t prog_id, const TranslatedProgramHLSL& translated);
