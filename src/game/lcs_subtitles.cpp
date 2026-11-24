@@ -84,19 +84,6 @@ struct HudText {
 };
 std::vector<HudText> g_hud_queue;
 
-// Money and clock: CHud::DrawTimeAndCashNumbers(char* text, float x, float y, uint8 time, bool
-// right) draws sprite digits (an 8x4 sheet); with Pricedown Bl.otf they are drawn in its glyphs,
-// one per digit cell of the game's layout.
-constexpr uint64_t kGotDrawTimeAndCashRva = 0x806a88ULL;
-struct HudNumbers {
-    std::string text;
-    float x = 0.0f, y = 0.0f;              // virtual 640x448: right edge when `right`, else left
-    float scale_x = 1.0f, scale_y = 1.0f;  // Touchscreen::GetSummaryScaleX / Y
-    bool money = false, right = false, widescreen = false;  // uint8 param: 1 money, 0 clock
-    uint8_t alpha = 255;                   // CHud::m_HudAlpha
-};
-std::vector<HudNumbers> g_num_queue;
-
 // CFont::PrintString return addresses of those texts, found with the rig
 // (LCS_DIAG_HUDTIMER: COnscreenTimer::AddClock / AddCounter and CMessages::AddBigMessage).
 enum class HudKind { None, Line, Wrapped, Pricedown };
@@ -618,30 +605,6 @@ uint64_t handle_print_string(const uint64_t* args) {
     return 1; // Suppress native CFont bitmap draw
 }
 
-uint64_t handle_time_cash(const uint64_t* args) {
-    if (lcs::settings::get().subtitle_font != 1 || !ui::fontPricedown() || !g_load_bias) return 0;
-    const char* str = reinterpret_cast<const char*>(args[0]);
-    if (!str || !str[0]) return 0;
-    // Touchscreen::GetSummaryScaleX / Y: GTouchscreen->[+0xe8] {+0x10 / 240, +0x14 / 160}
-    const uint64_t ts = *reinterpret_cast<const uint64_t*>(*reinterpret_cast<const uint64_t*>(g_load_bias + 0x7f9210ULL));
-    const uint64_t layout = ts ? *reinterpret_cast<const uint64_t*>(ts + 0xe8ULL) : 0;
-    if (!layout) return 0;
-    HudNumbers n;
-    n.text.assign(str, strnlen(str, 24));
-    n.money = (args[1] & 0xffu) != 0;
-    n.right = (args[2] & 1u) != 0;
-    const uint32_t xb = static_cast<uint32_t>(args[3]), yb = static_cast<uint32_t>(args[4]);
-    std::memcpy(&n.x, &xb, 4);
-    std::memcpy(&n.y, &yb, 4);
-    n.scale_x = *reinterpret_cast<const float*>(layout + 0x10ULL) / 240.0f;
-    n.scale_y = *reinterpret_cast<const float*>(layout + 0x14ULL) / 160.0f;
-    n.widescreen = *reinterpret_cast<const uint8_t*>(*reinterpret_cast<const uint64_t*>(g_load_bias + 0x7f9698ULL)) != 0;
-    n.alpha = *reinterpret_cast<const uint8_t*>(*reinterpret_cast<const uint64_t*>(g_load_bias + 0x7fa178ULL));
-    std::lock_guard<std::mutex> lk(g_sub_mutex);
-    if (g_num_queue.size() < 8) g_num_queue.push_back(std::move(n));
-    return 1;  // Suppress the sprite digits
-}
-
 struct RenderedRun {
     ColorSeg::Kind kind = ColorSeg::Kind::Text;
     std::string text;
@@ -813,37 +776,6 @@ void install_hooks(const lcs::cpu::ElfImage& image_game, lcs::cpu::DynarmicCore&
     std::memcpy(code + 0x228, &hle_borders, sizeof(uint64_t));
     std::memcpy(code + 0x230, &orig_borders, sizeof(uint64_t));
 
-    // Stub 3 (+0x300): CHud::DrawTimeAndCashNumbers(char* text [x0], float x [s0], float y [s1],
-    // uint8 time [w1], bool right [w2]) -> handler args {text, time, right, x bits, y bits}
-    const uint64_t hle_cash = hle.register_function("__pc_hud_time_cash", handle_time_cash);
-    const uint64_t orig_cash = patch_got(cpu, load_bias, kGotDrawTimeAndCashRva, base_va + 0x300,
-                                         image_game, "_ZN4CHud22DrawTimeAndCashNumbersEPcffhb");
-    const uint32_t stub_cash[18] = {
-        0xa9bc7bfdu, // 0x00: stp x29, x30, [sp, #-64]!
-        0xa90107e0u, // 0x04: stp x0, x1, [sp, #16]
-        0xf90013e2u, // 0x08: str x2, [sp, #32]
-        0x6d0287e0u, // 0x0c: stp d0, d1, [sp, #40]
-        0x1e260003u, // 0x10: fmov w3, s0
-        0x1e260024u, // 0x14: fmov w4, s1
-        0x58000190u, // 0x18: ldr x16, +0x30 -> 0x48 (hle_cash)
-        0xd63f0200u, // 0x1c: blr x16
-        0xb50000e0u, // 0x20: cbnz x0, +0x1c -> 0x3c (drawn in Pricedown: skip the sprites)
-        0xa94107e0u, // 0x24: ldp x0, x1, [sp, #16]
-        0xf94013e2u, // 0x28: ldr x2, [sp, #32]
-        0x6d4287e0u, // 0x2c: ldp d0, d1, [sp, #40]
-        0xa8c47bfdu, // 0x30: ldp x29, x30, [sp], #64
-        0x580000f0u, // 0x34: ldr x16, +0x1c -> 0x50 (orig_cash)
-        0xd61f0200u, // 0x38: br  x16
-        0xa8c47bfdu, // 0x3c: ldp x29, x30, [sp], #64
-        0xd65f03c0u, // 0x40: ret
-        0xd503201fu, // 0x44: nop
-    };
-    if (orig_cash) {
-        std::memcpy(code + 0x300, stub_cash, sizeof(stub_cash));
-        std::memcpy(code + 0x348, &hle_cash, sizeof(uint64_t));
-        std::memcpy(code + 0x350, &orig_cash, sizeof(uint64_t));
-    }
-
     cpu.invalidate_cache(base_va, 0x1000);
     std::cout << "  [Subtitles] CFont Oswald hooks armed.\n";
 #else
@@ -855,7 +787,6 @@ void begin_frame() {
     std::lock_guard<std::mutex> lk(g_sub_mutex);
     g_sub_queue.clear();
     g_hud_queue.clear();
-    g_num_queue.clear();
     g_letterbox_active = false;
 }
 
@@ -868,7 +799,7 @@ bool has_active_items() {
 bool has_active_hud_items() {
     if (lcs::settings::get().subtitle_font != 1) return false;
     std::lock_guard<std::mutex> lk(g_sub_mutex);
-    return !g_hud_queue.empty() || !g_num_queue.empty();
+    return !g_hud_queue.empty();
 }
 
 bool has_active_help_box() {
@@ -887,15 +818,13 @@ void draw_overlay(ImDrawList* dl, float display_w, float display_h) {
 
     std::vector<QueuedText> items;
     std::vector<HudText> hud_items;
-    std::vector<HudNumbers> num_items;
     bool letterbox_active = false;
     float letterbox_top_frac = 0.8973f;
     {
         std::lock_guard<std::mutex> lk(g_sub_mutex);
-        if (g_sub_queue.empty() && g_hud_queue.empty() && g_num_queue.empty()) return;
+        if (g_sub_queue.empty() && g_hud_queue.empty()) return;
         items = g_sub_queue;
         hud_items = g_hud_queue;
-        num_items = g_num_queue;
         letterbox_active = g_letterbox_active;
         letterbox_top_frac = g_letterbox_top_frac;
     }
@@ -949,30 +878,6 @@ void draw_overlay(ImDrawList* dl, float display_w, float display_h) {
                 cx += r.width;
             }
             cy += font_sz * 1.12f;
-        }
-    }
-
-    // Money and clock: a Pricedown glyph centred in each of the game's digit cells (the sprite
-    // layout: advance SummaryScaleX * 10/7 / aspect * 11 (9 in widescreen) + 1, cells 1.3 times
-    // the advance wide and SummaryScaleY * 13 high, a colon 4 px narrower)
-    if (ImFont* pd = ui::fontPricedown()) {
-        const float aspect_fix = (10.0f / 7.0f) / (display_w / display_h);
-        for (const auto& n : num_items) {
-            if (n.alpha == 0) continue;
-            const float adv = n.scale_x * aspect_fix * (n.widescreen ? 9.0f : 11.0f);
-            const float cell_w = adv * 1.3f, cell_h = n.scale_y * 13.0f;
-            const float font_sz = std::max(8.0f, cell_h * vy * 1.5f);
-            const ImU32 col = n.money ? IM_COL32(66, 116, 62, n.alpha) : IM_COL32(188, 154, 56, n.alpha);
-            // Pricedown's own spacing (its digits are narrower than the sprite cells), anchored on
-            // the game's edge and never wider than the sprite string
-            const float colons = static_cast<float>(std::count(n.text.begin(), n.text.end(), ':'));
-            const float sprite_w = (static_cast<float>(n.text.size() - 1) * (adv + 1.0f) + cell_w - 4.0f * colons) * vx;
-            float sz = font_sz;
-            const float natural_w = pd->CalcTextSizeA(sz, FLT_MAX, 0.0f, n.text.c_str()).x;
-            if (natural_w > sprite_w && natural_w > 0.0f) sz *= sprite_w / natural_w;
-            const float tw = pd->CalcTextSizeA(sz, FLT_MAX, 0.0f, n.text.c_str()).x;
-            const ImVec2 pos(n.right ? n.x * vx - tw : n.x * vx, n.y * vy + (cell_h * vy - sz) * 0.5f);
-            draw_text_with_outline(dl, pd, sz, pos, n.text.c_str(), col, n.alpha, 160.0f, false);
         }
     }
 
