@@ -14,7 +14,7 @@ Todas são lidas por `lcs.exe` (`src/core/main.cpp`, salvo indicação).
 | `LCS_DIAG_POPIN_DRIVE=1` | A mesma contagem durante o trecho dirigindo do cruzeiro |
 | `LCS_DIAG_WHD_DUMP=1` | Grava as listas das células do HD World em `scratch/whd_lists_N.csv` (analisar com `tools/whd_lists_analyze.py`) |
 | `LCS_WHD_LQ_RULE=0` | Desliga a regra de substituição LQ (A/B) |
-| `LCS_PED_INVIEW_MIN=m` | Piso da distância de spawn de pedestres na visão (padrão 110..160 m conforme a distância de população) |
+| `LCS_PED_INVIEW_MIN=m` | Piso da distância de spawn de pedestres na visão (padrão: sem piso — o jogo já usa ≥ ~90 m; 100–160 m esvaziou as calçadas perto do jogador) |
 | `LCS_CAR_INVIEW_BASE=b`, `LCS_CAR_NODE_RADIUS=r` | Base do spawn de carros na visão (185) e raio de busca de nós (380) — 280/520 esvaziou as ruas |
 | `LCS_DIAG_VERIFY=1` | Liga o rig automático: navega menus, tira capturas em `scratch/verify_*.bmp`, sai sozinho. Sem ela, `main.cpp:114` segue o fluxo normal |
 | `LCS_DIAG_CRUISE=1` | Com `VERIFY`: inicia jogo, põe o jogador num Kuruma e percorre a rota de Portland com teletransportes; capturas `scratch/cruise_*.bmp`; termina com `[VerifyDone] Cruise complete. peak_ms= min_ms= cell_caps=` |

@@ -147,7 +147,8 @@ void PopinProbe::report(const std::string& label, double seconds) {
         char buf[512];
         std::snprintf(buf, sizeof(buf),
                       "  [Popin] %s %s: in view <50m %d, 50-100 %d, 100-150 %d, 150+ %d (min %.0f m) | "
-                      "out of view <30m %d, 30-60 %d, 60+ %d | in view <100m per minute %.1f\n",
+                      "out of view <30m %d, 30-60 %d, 60+ %d | in view <100m per minute %.1f | "
+                      "alive <100m %.1f <200m %.1f\n",
                       label.c_str(), kind, c.in_view[0], c.in_view[1], c.in_view[2], c.in_view[3],
                       c.min_in_view < 1e8f ? c.min_in_view : -1.0f, c.out_view[0], c.out_view[1], c.out_view[2],
                       (c.in_view[0] + c.in_view[1]) * per_min, c.ticks ? c.near100 / c.ticks : 0.0,

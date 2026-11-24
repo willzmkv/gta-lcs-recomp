@@ -1772,7 +1772,9 @@ void LcsDistance::sync_spawn_distances() {
     // the in-view base (140, 185 before) must move with that window or every car is discarded.
     const float car_base = env_float("LCS_CAR_INVIEW_BASE", extended ? 185.0f + 75.0f * t : 185.0f);
     const float car_radius = env_float("LCS_CAR_NODE_RADIUS", extended ? 380.0f + 120.0f * t : 380.0f);
-    const float ped_min = env_float("LCS_PED_INVIEW_MIN", extended ? 110.0f + 50.0f * t : 0.0f);
+    // No floor by default: the game already spawns peds in view >= ~90 m, and a floor (even 100 m)
+    // emptied the pavements near the player by 35-60% (pop-in probe, 2026-11-24).
+    const float ped_min = env_float("LCS_PED_INVIEW_MIN", 0.0f);
     if (std::fabs(car_base - m_applied_car_inview) >= 1.0f) {
         const uint32_t insn = mov_w8_float(car_base);
         patch_mem(*m_cpu, m_load_bias + 0x3b2a0cULL, &insn, sizeof(uint32_t));
