@@ -196,11 +196,33 @@ Ordem pensada para dar o maior ganho perceptível primeiro. Detalhes técnicos e
    `texldd` em `uv' + hash(v_i)` com `ddx/ddy(uv')`, somados pelos pesos (conferir no fim do
    `sh_056` se há correção de contraste). Lista branca do SA: `SkyGfx/models/texdb.txt` (307
    `stochastic=1`); para o LCS montar uma lista própria por nome de textura.
-4. **FramerateVigilante por RE:** Ghidra instalado (`D:\ghidra_12.2_PUBLIC`, `analyzeHeadless`).
-   O `.asi` não tem textos descritivos: listar os endereços do GTA III 1.0 que ele altera
-   (constantes 0x4xxxxx–0x5xxxxx passadas às rotinas de patch), mapear para funções do GTA III e
-   achar os equivalentes no `libGame.so` (mesma linhagem). Estudar para reimplementar, sem copiar
-   código do mod.
+   **Feito (2026-11-24):** o fim do `sh_056` não corrige contraste (mistura linear × cor do
+   vértice). `src/game/lcs_stochastic.cpp` intercepta `uploadPVRTexture`/`uploadPNGTexture` (GOT
+   `0x809ec0`/`0x809eb8`; `lglTexture`: id GL em `+4`, caminho `std::string` em `+0x40`, ex.
+   `Textures_ETC_LOD/<txd>/<nome>.pvr`) e marca o id GL quando o nome está na lista branca (87
+   nomes: o cruzamento com o `texdb.txt` do SkyGfx + variantes de tamanho/LOD + chão/rocha/asfalto
+   uniformes; `stochastic_textures.txt` ao lado do `lcs.exe` acrescenta nomes, `-nome` remove). O
+   backend D3D12 põe por draw em `pc_color_grade.w` a máscara (bit i = `t<i>` marcada, bit 2 =
+   pesos aguçados) e o tradutor GLSL→HLSL troca `texture2D` por um helper por sampler; `t0`/`t1`
+   usam `lcs_sample_sto` (3× `SampleGrad`, grade triangular, sem a escala 1,2× do SkyGfx para não
+   mudar o tamanho do detalhe). Opção `graphics.stochastic_textures` (0/1/2, padrão 1) no menu
+   Gráficos. Verificado em A/B no cruzeiro (asfalto muda, sem costuras; faixas intactas).
+   **Observação:** o backend D3D12 não tem mipmaps (`MipLevels = 1`; `gl_tex_image_2d` ignora
+   `level != 0`): texturas de chão distantes cintilam. Candidato a melhoria de qualidade maior
+   que o próprio estocástico (gerar mips no decode do `texture_pipeline`).
+4. **FramerateVigilante por RE (feito 2026-11-24):** Ghidra headless (`D:\ghidra_12.2_PUBLIC`,
+   `tools/ghidra/ExportDecomp.java`) + varredura capstone. O FV III tem só 4 correções (o código
+   é MIT, <https://github.com/GTAmodding/FramerateVigilante>, e confirmou o RE): (1) limite de FPS
+   (`RsGlobal.maxFPS` `0x8F4374` e byte `0x584C78`) e refresh rate — não se aplicam; (2)
+   `0x5512D2` "CarWheelOnRailsSpinFix" (`fmul` × `ms_fTimeStep/1.6667`) — no LCS o carro "on
+   rails" já usa `CVehicle::ProcessWheelRotation`, que multiplica pelo timestep; (3)
+   `0x5515ED`/`0x551600` "CarSlowDownSpeedFix" (`fWheelFriction` 0.9 × timestep/1.6667 em
+   `CVehicle::ProcessWheel`) — já coberto pela resistência de rolagem do
+   `lcs_physics_timing.cpp`; (4) `0x534092` "SirenTurnOnFix" (toque < 150 ms) — o LCS tem a mesma
+   lógica com histórico de 8 quadros (`Pads+0xa6`, índice `+0xae`; toque < 7 quadros alterna
+   `m_bSirenOrAlarm` `+0x331`, segurar 8 quadros liga a buzina `+0x32c`): **portado** como
+   decisão por relógio (233 ms = 7 quadros a 30 FPS) no stub em `+0x4cba3c`
+   (`LCS_SIREN_TAP_FIX=0` desliga); falta o usuário testar num carro de polícia.
 
 ### 5.1.1 Pendências de mapa — estado
 

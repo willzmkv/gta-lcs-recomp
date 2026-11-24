@@ -19,6 +19,9 @@ Todas são lidas por `lcs.exe` (`src/core/main.cpp`, salvo indicação).
 | `LCS_DIAG_SHOT_RADIUS=r` | Com `SHOTS`: raio do HD World nas capturas (padrão o do `lcs.ini`) |
 | `LCS_PED_PUSH_FIX=0` | Desliga o empurrão ped → veículo independente de FPS (`CPhysical::ApplyCollision`) |
 | `LCS_LARGE_OBJ_FAR=0` | Desliga a regra de objetos grandes (raio de colisão ≥ 15 m desenhados até 30× o raio, máx. 1500 m; `src/game/lcs_distance.cpp`, `large_object_far`) |
+| `LCS_STOCHASTIC=0\|1\|2` | Sobrepõe `graphics.stochastic_textures` do `lcs.ini` (A/B): `0` desligado, `1` SkyGfx (mistura linear), `2` pesos aguçados (`w⁴`, mais contraste) |
+| `LCS_DIAG_TEXNAMES=1` | Loga cada textura enviada uma vez (`[TexName] Textures_ETC_LOD/<txd>/<nome>.pvr`, com `stochastic` se está na lista branca; `src/game/lcs_stochastic.cpp`) |
+| `LCS_SIREN_TAP_FIX=0` | Desliga a sirene/buzina por tempo (toque < 233 ms alterna a sirene, segurar toca a buzina; `src/game/lcs_physics_timing.cpp`) |
 | `LCS_DIAG_SHOT_AREA=n` | Com `SHOTS`: força `CGame::currArea` nas capturas (o piso de interiores não carrega assim: inconclusivo para a safehouse) |
 | `LCS_DIAG_SKIP=distance,memory,worldhd` | Não instala esses módulos (bissecção de bugs de render). Sem `memory` o mundo não carrega |
 | `LCS_DIAG_CLOUDS=1` | Loga a cada 2 s as taxas de `CClouds::CloudRotation`/`IndividualRotation` e o valor esperado (independente de FPS) |

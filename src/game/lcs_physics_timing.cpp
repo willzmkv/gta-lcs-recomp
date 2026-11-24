@@ -95,6 +95,29 @@ volatile uint32_t* g_scrollbar_tick = nullptr;
 const float* g_cloud_rotation = nullptr;     // CClouds::CloudRotation (LCS_DIAG_CLOUDS)
 const uint32_t* g_individual_rotation = nullptr;
 const float* g_wind = nullptr;
+const uint8_t* g_pads = nullptr;             // CPad Pads[]: horn history ring at +0xa6, index at +0xae
+const uint32_t* g_time_ms = nullptr;         // CTimer::m_snTimeInMilliseconds
+
+// Horn button on a siren vehicle (CAutomobile::ProcessControl): the game decides from an
+// 8-frame horn history (released within 7 frames = toggle the siren, held 8 frames = horn), so
+// at 144 FPS a tap had to be shorter than ~49 ms. Same decision on the game clock, 7 frames at
+// 30 FPS = 233 ms. Returns 0 = no horn, 1 = horn, 2 = toggle the siren.
+uint64_t siren_horn_decision() {
+    constexpr uint32_t kTapMs = 233;
+    static bool s_down = false;
+    static uint32_t s_press_ms = 0;
+    const bool down = g_pads[0xa6 + (g_pads[0xae] & 7)] != 0;
+    const uint32_t now = *g_time_ms;
+    uint64_t result = 0;
+    if (down) {
+        if (!s_down) s_press_ms = now;
+        result = (now - s_press_ms >= kTapMs) ? 1 : 0;
+    } else if (s_down) {
+        result = (now - s_press_ms < kTapMs) ? 2 : 0;
+    }
+    s_down = down;
+    return result;
+}
 } // namespace
 
 void tick_fixed_rate_effects() {
@@ -630,6 +653,52 @@ void install_physics_timing_hooks(const lcs::cpu::ElfImage& image_game, lcs::cpu
             std::cout << "  - Applied frame-rate independent CClouds::Update rotation.\n";
         } else {
             std::cerr << "  [PhysicsTiming] CClouds::Update layout differs; clouds fix not applied.\n";
+        }
+    }
+
+    // Siren toggle vs. horn (FramerateVigilante's SirenTurnOnFix for GTA III, same logic in LCS):
+    // the 8-frame horn history check after CVehicle::UsesSiren() at +0x4cba3c is replaced by
+    // siren_horn_decision(). LCS_SIREN_TAP_FIX=0 leaves it alone.
+    if (const char* e = std::getenv("LCS_SIREN_TAP_FIX"); !(e && e[0] == '0')) {
+        const uint64_t lb = image_game.get_load_bias();
+        const auto* site = reinterpret_cast<const uint32_t*>(lb + 0x4cba3cULL);
+        static constexpr uint32_t kExpect[4] = {0xd0001968u, 0xf9414108u, 0x3942b909u, 0x9102990bu};
+        g_pads = reinterpret_cast<const uint8_t*>(image_game.find_symbol("Pads"));
+        g_time_ms = reinterpret_cast<const uint32_t*>(image_game.find_symbol("_ZN6CTimer22m_snTimeInMillisecondsE"));
+        uint8_t* page = nullptr;
+        if (g_pads && g_time_ms && std::memcmp(site, kExpect, sizeof(kExpect)) == 0 && (page = alloc_stub_page())) {
+            const uint64_t hle_va = lcs::cpu::HLEManager::instance().register_function(
+                "__lcs_siren_horn_decision", [](const uint64_t*) -> uint64_t { return siren_horn_decision(); });
+            const uint32_t stub[16] = {
+                0xaa1303e0u,             // mov  x0, x19 (this)
+                ldr_x_rel(16, 0x04, 0x40),
+                0xd63f0200u,             // blr  x16 -> siren_horn_decision
+                0x7100041fu,             // cmp  w0, #1
+                0x540000a0u,             // b.eq horn
+                0x7100081fu,             // cmp  w0, #2
+                0x540000a0u,             // b.eq toggle
+                ldr_x_rel(16, 0x1c, 0x48),
+                0xd61f0200u,             // br   x16 -> no horn (m_nCarHornTimer = 0)
+                ldr_x_rel(16, 0x24, 0x50),
+                0xd61f0200u,             // br   x16 -> horn (m_nCarHornTimer = 1)
+                ldr_x_rel(16, 0x2c, 0x58),
+                0xd61f0200u,             // br   x16 -> toggle m_bSirenOrAlarm
+                0xd503201fu, 0xd503201fu, 0xd503201fu,
+            };
+            const uint64_t lits[4] = {hle_va, lb + 0x4cbaecULL, lb + 0x4cbac8ULL, lb + 0x4cd190ULL};
+            const uint64_t page_va = reinterpret_cast<uint64_t>(page);
+            std::memcpy(page, stub, sizeof(stub));
+            std::memcpy(page + 0x40, lits, sizeof(lits));
+            cpu.invalidate_cache(page_va, 0x60);
+            const uint32_t jump[4] = {
+                0x58000050u, // ldr x16, #8
+                0xd61f0200u, // br  x16
+                static_cast<uint32_t>(page_va), static_cast<uint32_t>(page_va >> 32),
+            };
+            patch_bytes(cpu, lb + 0x4cba3cULL, jump, sizeof(jump));
+            std::cout << "  - Applied time-based siren toggle / horn (tap < 233 ms).\n";
+        } else {
+            std::cerr << "  [PhysicsTiming] Siren horn-history layout differs; siren fix not applied.\n";
         }
     }
 #else
