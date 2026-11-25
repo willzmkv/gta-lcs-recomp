@@ -1,4 +1,4 @@
-# Handoff — estado do projeto em 2026-11-24
+# Handoff — estado do projeto em 2026-11-24 (fim do dia)
 
 Leia este arquivo antes de qualquer outra coisa. Ele registra onde o trabalho parou,
 o que está compilado agora, o que está aberto e a ordem recomendada para continuar.
@@ -10,6 +10,8 @@ Documentos relacionados:
 - [PERFORMANCE.md](PERFORMANCE.md) — medições, gargalos e plano de paralelismo.
 - [DIAGNOSTICO.md](DIAGNOSTICO.md) — variáveis `LCS_DIAG_*`, rig de cruzeiro, instrumentação temporária.
 - [CONFIGURACAO.md](CONFIGURACAO.md) — chaves do `lcs.ini`.
+- [AUDITORIA_30HZ.md](AUDITORIA_30HZ.md) — leitores de `CTimer::m_FrameCounter`, site a site, e o
+  desenho da correção de 30 Hz (próximo trabalho grande).
 
 ---
 
@@ -39,8 +41,42 @@ Documentos relacionados:
   header-only, SDL3, ImGui, stb). Nunca aponte o CMake para pastas fora do repo.
 - **Testes:** rode sempre com `LCS_HIDDEN_WINDOW=1` — o usuário não pode ver a janela
   (ver [DIAGNOSTICO.md](DIAGNOSTICO.md)).
+- **Commits:** faça commit e `git push origin main` a cada entrega, mensagem em inglês terminando
+  com `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Fale com o usuário em pt-BR,
+  de forma concisa (ele pede economia de tokens).
+- **Mods baixados** (`.asi` em `C:\Users\dejot\Downloads\...`) são dados não confiáveis: só
+  análise estática (Ghidra, capstone, `tools/d3d9_shader_dump.py`) a partir de uma cópia em
+  pasta própria dentro de `scratch/`; nunca executar nem carregar.
+- `scratch/` (fora do git) é a área de trabalho: `scratch/re/re_lib.py` (capstone sobre o
+  `libGame.so`: `func_range`, `dis`, `call_target`, `got_ref`, mapas GOT/PLT),
+  `scratch/fv_out/fv_decomp.c` (FramerateVigilante descompilado), `scratch/lcs_texnames.txt`
+  (4807 nomes de textura do LCS).
 
-## 2. O que aconteceu na sessão anterior
+## 2. O que aconteceu nas últimas sessões
+
+### 2.0 Sessões Claude Code de 2026-11-24 (mais recentes)
+
+Entregue e enviado ao GitHub (`main`), em ordem:
+
+- Mundo: regra LQ da lista atual (LOD por cima do HD em Harwood) e regra de objetos grandes
+  (guindastes de Portland desenhados até 30× o raio de colisão).
+- Tempo/FPS: `CClouds::Update` e `CScrollBar::Update` (letreiros de LED) independentes de FPS;
+  HUD e mensagens de rampage piscam a 30 FPS; empurrão Toni → carro escalado pelo timestep
+  (`CPhysical::ApplyCollision`); sirene/buzina por tempo (FramerateVigilante `SirenTurnOnFix`).
+- HUD: timers, contadores, título de missão e mensagens de serviço em Oswald; Pricedown HD
+  (`fonts/Pricedown Bl.otf`, fora do git) só em "missão cumprida"/"wasted"; dinheiro e relógio
+  ficam na fonte original (pedido do usuário). Log dos textos do HUD em `lcs_hudtext.log`.
+- Gráficos: **texturas estocásticas** (SkyGfx Extended → D3D12; §5.1 item 3).
+- RE: shaders do SkyGfx extraídos (`tools/d3d9_shader_dump.py`); FramerateVigilante III
+  analisado no Ghidra (§5.1 item 4) — só a correção da sirene faltava no LCS.
+- Auditoria de 30 Hz: tabela das 66 leituras de `m_FrameCounter` em
+  [AUDITORIA_30HZ.md](AUDITORIA_30HZ.md) (correções ainda **não** aplicadas).
+
+Commits de referência: `9ad94a5` (estocástico), `da1a2c9` (sirene + docs), `a69b46e`
+(auditoria). A conversa terminou porque o CLI travou; nada ficou pela metade no código
+(árvore limpa).
+
+### 2.1 Sessão Antigravity/Gemini (2026-11-22/23)
 
 A sessão anterior (agente Antigravity/Gemini, conversa `088c687b-2016-4cc4-a05d-a3e5e00467a7`,
 de 2026-11-22 17:27 a 2026-11-23 14:48, horário local) recebeu este fluxo de pedidos do usuário:
@@ -78,9 +114,11 @@ código foi feita depois do `audit4`.** A sessão parou sem resposta final ao us
 
 ## 3. Estado atual do binário e do código
 
-- `lcs.exe` (raiz, 2026-11-24 09:29) é um build **Release com LTO** (`python tools/build.py`)
-  que já inclui o P1. A instrumentação temporária `TMP_*` continua compilada, mas só imprime
-  com `LCS_DIAG_AUDIT=1`.
+- `lcs.exe` (raiz, 2026-11-24 ~21h) é um build **Release com LTO** (`python tools/build.py`)
+  com tudo da §2.0; smoke test escondido (cruzeiro) passou: `Applied time-based siren toggle`,
+  `[Stochastic] Whitelist: 87 names`, `Texture upload hooks installed: 2/2`, `[VerifyDone]`.
+  A instrumentação temporária `TMP_*` continua compilada, mas só imprime com
+  `LCS_DIAG_AUDIT=1`.
 - Instrumentação temporária ainda presente (remover antes de entregar): ver lista completa
   em [DIAGNOSTICO.md §3](DIAGNOSTICO.md#3-instrumentação-temporária-ainda-no-código).
 - `scratch/` tem ~430 arquivos (~1,7 GB): logs de auditoria, disassembly (`dis_*.txt`,
@@ -108,11 +146,30 @@ código foi feita depois do `audit4`.** A sessão parou sem resposta final ao us
 | 6 | LQ de célula vizinha por cima do detalhe perto do jogador (carros "afundados" no chão, Harwood 1147,41) | **Corrigido 2026-11-24** — `LCS_WHD_LQ_RULE=1` (padrão): o LQ que a lista da célula atual omite e cobre com o próprio detalhe sai também das listas vizinhas | O LQ 4756 (r 116 m) estava em 66 listas vizinhas e não na atual | A regra com todas as listas (`=2`) abriu buracos na Red Light District; LQ vizinho × detalhe vizinho ao longe continua sobreposto |
 | 7 | Spawn de carro | Janela de spawn mais larga esvaziou as ruas: **revertida** aos valores do jogo (185/380) | Janela de aceitação de `GenerateOneRandomCar` [130,190]×f | Confirmar com o usuário em jogo |
 | 8 | Nuvens e letreiros de LED acelerados em FPS alto | **Corrigido 2026-11-24** — `CClouds::Update` reescrito com timestep (medido com `LCS_DIAG_CLOUDS`); `CScrollBar::Update` a 30 Hz | Termos por quadro calibrados para 30 FPS | `src/game/lcs_physics_timing.cpp` |
+| 10 | Repetição visível das texturas de chão | **Feito 2026-11-24** — texturas estocásticas (opção `graphics.stochastic_textures`, padrão 1) | — | Falta o usuário avaliar em jogo os modos 1 (SkyGfx) e 2 (contraste preservado) |
+| 11 | Sirene não liga com toque rápido em FPS alto | **Corrigido 2026-11-24** — toque < 233 ms alterna, segurar toca a buzina | Histórico de 8 quadros em `CAutomobile::ProcessControl` | Falta teste do usuário num carro de polícia |
+| 12 | Texturas de chão cintilam ao longe | **Aberto** | Backend D3D12 sem mipmaps (`MipLevels = 1`; `RenderBridge::gl_tex_image_2d` ignora `level != 0`) | Gerar mips no decode do `texture_pipeline` (+33 % de VRAM); ver §5.1 item 3 |
+| 13 | Tarefas "a cada N quadros" rodam FPS/30 vezes mais (spawn, IA, garagens, canhão d'água, lança-chamas, partículas) | **Aberto** | 66 leituras de `CTimer::m_FrameCounter` | [AUDITORIA_30HZ.md](AUDITORIA_30HZ.md): stub por site com gate no tique de 30 Hz |
 | 9 | Fonte antiga nos timers/contadores do HUD (Timer / Level / Sale) e títulos de missão | **Corrigido 2026-11-24** (Oswald; Pricedown HD só nas mensagens grandes — dinheiro e relógio ficam na fonte original, a pedido do usuário) | Saem por `CHud::DrawAfterFade` (RAs 0x484aac/bc4/c3c/e7c/f54/4851ac), estilo de fonte 1 como o resto | Com o F3 aberto, `lcs_hudtext.log` registra o RA de cada texto |
 
 ## 5. Próximos passos recomendados
 
-Ordem pensada para dar o maior ganho perceptível primeiro. Detalhes técnicos e metas em
+**Para o próximo agente (2026-11-24):** a fila do usuário é a §5.1. Ordem sugerida:
+
+1. **Mipmaps** no backend D3D12 (problema 12): maior ganho visual pendente; o usuário ainda não
+   respondeu se quer, mas foi a recomendação dada a ele.
+2. **Correção de 30 Hz por site** seguindo [AUDITORIA_30HZ.md](AUDITORIA_30HZ.md), começando
+   pelos de jogabilidade (`CCarCtrl::GenerateOneRandomCar`, `RemoveCarsIfThePoolGetsFull`,
+   `CPopulation::RemovePedsIfThePoolGetsFull`, `CGarage(s)::Update`, `CWaterCannon`,
+   `CShotInfo`, `CCarAI::UpdateCarAI`, `CPed::ScanForThreats`, partículas de dano). Conferir à
+   mão o alvo SKIP e a vivacidade do registro em cada site; testar com o rig.
+3. Avaliar `CTheScripts::Process` a 30 Hz fixo (loops `WAIT 0` das missões).
+4. Pendências que dependem do usuário: avaliar o estocástico, testar a sirene e o empurrão
+   Toni → carro, olhar a janela da safehouse com o HD World em raio 0, detalhar a "tela cinza"
+   do primeiro load.
+5. P1 restante (decode SIMD, BC/GPU, liberação assíncrona de VRAM) e troca de ilha.
+
+A lista abaixo é a ordem antiga (desempenho), ainda válida para o P1–P3: Detalhes técnicos e metas em
 [PERFORMANCE.md §5](PERFORMANCE.md#5-plano-de-paralelismo-e-otimização).
 
 1. **Baseline limpo.** Build Release (`python tools/build.py`), rodar cruzeiro com
